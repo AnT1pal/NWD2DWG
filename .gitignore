@@ -1,0 +1,20 @@
+﻿# Build and temporary outputs
+selftest_out/
+*.tmp
+*.log
+*.pdb
+*.obj
+*.suo
+*.user
+
+# Intermediate temp archives
+dist/NWD2DWG_temp_*
+dist/CheckBBox*
+dist/TestAcad*
+
+# IDE & Editor files
+.vs/
+.idea/
+.vscode/
+bin/
+obj/

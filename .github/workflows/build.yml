@@ -1,0 +1,31 @@
+﻿name: Build and Package NWD2DWG
+
+on:
+  push:
+    branches: [ master, main ]
+  pull_request:
+    branches: [ master, main ]
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Setup .NET
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: '8.0.x'
+
+    - name: Run Build Script
+      shell: powershell
+      run: |
+        powershell -ExecutionPolicy Bypass -File .\build.ps1
+
+    - name: Upload Artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: NWD2DWG_Release
+        path: dist/*.zip
