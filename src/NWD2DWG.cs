@@ -2080,10 +2080,103 @@ namespace NWD2DWG
                     ifcOk ? "OK" : "FAIL", ifcOk ? new FileInfo(ifcPath).Length : 0, ifcValid ? "ДА" : "НЕТ"));
                 if (!ifcOk || !ifcValid) W("ОШИБКА: IFC экспорт не удался или невалиден");
 
+                // === v3.0: Тест GeoTransform ===
+                var geoVerts = new List<double> { 5000000.0, 2000000.0, 150.0, 5000002.0, 2000002.0, 152.0 };
+                var geoRes = Plugin.GeoTransform.AnalyzeBounds(geoVerts, 1000.0);
+                Plugin.GeoTransform.ApplyShift(geoVerts, geoRes.OffsetX, geoRes.OffsetY, geoRes.OffsetZ);
+                bool geoOk = geoRes.IsShifted && Math.Abs(geoVerts[0]) < 10.0;
+                W(string.Format("GeoTransform: смещение=({0:F0}, {1:F0}, {2:F0}), сдвиг к нулю={3}",
+                    geoRes.OffsetX, geoRes.OffsetY, geoRes.OffsetZ, geoOk ? "OK" : "FAIL"));
+                if (!geoOk) W("ОШИБКА: GeoTransform не рассчитал сдвиг геометрии к нулю");
+
+                // === v3.0: Тест GridExtractor ===
+                string gridDxfPath = Path.Combine(dir, "selftest_grids.dxf");
+                using (var gw = new StreamWriter(gridDxfPath, false, Encoding.UTF8))
+                {
+                    gw.WriteLine("0\nSECTION\n2\nENTITIES");
+                    var grids = new List<Plugin.GridLineData>
+                    {
+                        new Plugin.GridLineData { Name = "1", StartX = 0, StartY = 0, StartZ = 0, EndX = 0, EndY = 10000, EndZ = 0, IsLevel = false },
+                        new Plugin.GridLineData { Name = "Ур.+3.000", StartX = -5000, StartY = 0, StartZ = 3000, EndX = 5000, EndY = 0, EndZ = 3000, IsLevel = true }
+                    };
+                    Plugin.GridExtractor.WriteGridsToDxf(gw, grids, 300.0);
+                    gw.WriteLine("0\nENDSEC\n0\nEOF");
+                }
+                bool gridOk = File.Exists(gridDxfPath) && File.ReadAllText(gridDxfPath).Contains("_GRIDS") && File.ReadAllText(gridDxfPath).Contains("_LEVELS");
+                W("GridExtractor: экспорт осей и отметок уровней=" + (gridOk ? "OK" : "FAIL"));
+                if (!gridOk) W("ОШИБКА: GridExtractor не записал оси в DXF");
+
+                // === v3.0: Тест PipeTracer ===
+                var cylSolid = new Plugin.SolidResult
+                {
+                    Type = Plugin.SolidType.Cylinder,
+                    CenterX = 100, CenterY = 200, CenterZ = 50,
+                    AxisX = 1, AxisY = 0, AxisZ = 0,
+                    Radius = 54.0, Height = 1000.0, Confidence = 0.95
+                };
+                var pipeSeg = Plugin.PipeTracer.TraceFromSolid(cylSolid, "Heating");
+                bool pipeOk = pipeSeg != null && pipeSeg.Diameter == 108.0 && pipeSeg.Length == 1000.0;
+                W(string.Format("PipeTracer: трассировка трубы DN{0:F0} L={1:F0}={2}",
+                    pipeSeg != null ? pipeSeg.Diameter : 0, pipeSeg != null ? pipeSeg.Length : 0, pipeOk ? "OK" : "FAIL"));
+                if (!pipeOk) W("ОШИБКА: PipeTracer не извлек параметры трубопровода");
+
+                // === v3.0: Тест BoqCalculator ===
+                var boq = new Plugin.BoqCalculator();
+                boq.AddMesh("Architecture", "Wall_Concrete", "Concrete_B25", sink.Verts, sink.Quads);
+                string boqCsvPath = Path.Combine(dir, "selftest_boq.csv");
+                boq.ExportCsv(boqCsvPath);
+                bool boqOk = File.Exists(boqCsvPath) && File.ReadAllText(boqCsvPath).Contains("Concrete_B25");
+                W("BoqCalculator: расчет объемов ВОР в CSV/Excel=" + (boqOk ? "OK" : "FAIL"));
+                if (!boqOk) W("ОШИБКА: BoqCalculator не экспортировал сводную ведомость объемов");
+
+                // === v3.0: Тест BcfExporter ===
+                string bcfPath = Path.Combine(dir, "selftest_clashes.bcfzip");
+                var bcfTopics = new List<Plugin.BcfTopic>
+                {
+                    new Plugin.BcfTopic
+                    {
+                        Title = "Коллизия: Труба ОВ vs Балка КМ",
+                        Description = "Пересечение на отм. +3.450",
+                        CameraPosX = 100, CameraPosY = 200, CameraPosZ = 300,
+                        CameraDirX = 0, CameraDirY = 1, CameraDirZ = 0,
+                        CameraUpX = 0, CameraUpY = 0, CameraUpZ = 1
+                    }
+                };
+                Plugin.BcfExporter.ExportBcfZip(bcfPath, bcfTopics);
+                bool bcfOk = File.Exists(bcfPath) && new FileInfo(bcfPath).Length > 100;
+                W("BcfExporter: генерация пакета коллизий BCF 2.1=" + (bcfOk ? "OK" : "FAIL"));
+                if (!bcfOk) W("ОШИБКА: BcfExporter не создал валидный .bcfzip");
+
+                // === v3.0: Тест BimDiff ===
+                var oldM = new Dictionary<string, Plugin.DiffElement>
+                {
+                    { "guid_1", new Plugin.DiffElement { Guid = "guid_1", Name = "Column_A", Verts = new List<double> { 0,0,0, 1,0,0, 0,1,0 } } },
+                    { "guid_2", new Plugin.DiffElement { Guid = "guid_2", Name = "Beam_Old", Verts = new List<double> { 0,0,0, 2,0,0, 0,2,0 } } }
+                };
+                var newM = new Dictionary<string, Plugin.DiffElement>
+                {
+                    { "guid_1", new Plugin.DiffElement { Guid = "guid_1", Name = "Column_A", Verts = new List<double> { 0,0,0, 1,0,0, 0,1,0 } } }, // Unchanged
+                    { "guid_3", new Plugin.DiffElement { Guid = "guid_3", Name = "Pipe_New", Verts = new List<double> { 5,5,5, 6,5,5, 5,6,5 } } }   // Added
+                };
+                var diffRes = Plugin.BimDiffEngine.Compare(oldM, newM);
+                bool diffOk = diffRes.Count == 2; // guid_3 Added, guid_2 Deleted
+                W(string.Format("BimDiff: 3D-сравнение версий (найдено изменений: {0})={1}", diffRes.Count, diffOk ? "OK" : "FAIL"));
+                if (!diffOk) W("ОШИБКА: BimDiff не выявил изменения в модели");
+
+                // === v3.0: Тест SpatialTiler & BimAnonymizer ===
+                var tileKey = Plugin.SpatialTiler.GetTileKey(25000, 45000, 3000, 20000);
+                bool tileOk = tileKey.TileX == 1 && tileKey.TileY == 2 && tileKey.TileZ == 0;
+                var rawP = new Dictionary<string, string> { { "Cost::Price", "100000" }, { "General::Category", "Duct" } };
+                var cleanP = Plugin.BimAnonymizer.SanitizeProperties(rawP);
+                bool anonOk = !cleanP.ContainsKey("Cost::Price") && cleanP.ContainsKey("General::Category");
+                W(string.Format("SpatialTiler & BimAnonymizer: захватка={0}, анонимизация={1}",
+                    tileOk ? "OK" : "FAIL", anonOk ? "OK" : "FAIL"));
+
                 bool allOk = polylines == 1 && seqends == 1 && vverts == 8 && fverts == 12 && f3 == 12
                              && decTris < 12 && solidRes.Type == Plugin.SolidType.Box
-                             && gltfOk && glbOk && ifcOk && ifcValid;
-                W("САМОТЕСТ ПРОЙДЕН: " + (allOk ? "OK (все 10 модулей исправны)" : "ОШИБКИ"));
+                             && gltfOk && glbOk && ifcOk && ifcValid
+                             && geoOk && gridOk && pipeOk && boqOk && bcfOk && diffOk && tileOk && anonOk;
+                W("САМОТЕСТ ПРОЙДЕН: " + (allOk ? "OK (все 20 модулей v3.0 исправны)" : "ОШИБКИ"));
             }
             catch (Exception ex)
             {

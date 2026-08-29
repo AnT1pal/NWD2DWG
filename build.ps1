@@ -38,7 +38,15 @@ $pluginSources = @(
     (Join-Path $src 'MeshDecimator.cs'),
     (Join-Path $src 'SolidReconstructor.cs'),
     (Join-Path $src 'GltfWriter.cs'),
-    (Join-Path $src 'IfcWriter.cs')
+    (Join-Path $src 'IfcWriter.cs'),
+    (Join-Path $src 'GeoTransform.cs'),
+    (Join-Path $src 'GridExtractor.cs'),
+    (Join-Path $src 'PipeTracer.cs'),
+    (Join-Path $src 'BoqCalculator.cs'),
+    (Join-Path $src 'BcfExporter.cs'),
+    (Join-Path $src 'BimDiff.cs'),
+    (Join-Path $src 'SpatialTiler.cs'),
+    (Join-Path $src 'BimAnonymizer.cs')
 )
 $outPlugin = Join-Path $dist 'NWD2DWG.Plugin.dll'
 
@@ -46,6 +54,8 @@ $pluginRefs = @(
     "$refDir\mscorlib.dll",
     "$refDir\System.dll",
     "$refDir\System.Core.dll",
+    "$refDir\System.IO.Compression.dll",
+    "$refDir\System.IO.Compression.FileSystem.dll",
     "$refDir\Microsoft.CSharp.dll"
 )
 if ($nwDir) {
@@ -82,7 +92,15 @@ $exeSources = @(
     (Join-Path $src 'MeshDecimator.cs'),
     (Join-Path $src 'SolidReconstructor.cs'),
     (Join-Path $src 'GltfWriter.cs'),
-    (Join-Path $src 'IfcWriter.cs')
+    (Join-Path $src 'IfcWriter.cs'),
+    (Join-Path $src 'GeoTransform.cs'),
+    (Join-Path $src 'GridExtractor.cs'),
+    (Join-Path $src 'PipeTracer.cs'),
+    (Join-Path $src 'BoqCalculator.cs'),
+    (Join-Path $src 'BcfExporter.cs'),
+    (Join-Path $src 'BimDiff.cs'),
+    (Join-Path $src 'SpatialTiler.cs'),
+    (Join-Path $src 'BimAnonymizer.cs')
 )
 $exeSrcArgs = $exeSources | ForEach-Object { "`"$_`"" }
 
@@ -109,7 +127,7 @@ if ($LASTEXITCODE -ne 0) { throw "Самотест провалился (код 
 Write-Host "Самотест OK: $stDir"
 
 # 4. Упаковка ZIP архива с исходным кодом (GNU GPL v3)
-$zipFile = Join-Path $dist 'NWD2DWG_v2.0.zip'
+$zipFile = Join-Path $dist 'NWD2DWG_v3.0.zip'
 $readmeFile = Join-Path $dist 'README_RU.txt'
 $licFile = Join-Path $root 'LICENSE'
 $buildScript = Join-Path $root 'build.ps1'
