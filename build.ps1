@@ -33,7 +33,13 @@ if (-not $nwDir) {
 
 # 1. Сборка NWD2DWG.Plugin.dll
 Write-Host "--- Сборка NWD2DWG.Plugin.dll ---"
-$pluginSrc = Join-Path $src 'NwdPlugin.cs'
+$pluginSources = @(
+    (Join-Path $src 'NwdPlugin.cs'),
+    (Join-Path $src 'MeshDecimator.cs'),
+    (Join-Path $src 'SolidReconstructor.cs'),
+    (Join-Path $src 'GltfWriter.cs'),
+    (Join-Path $src 'IfcWriter.cs')
+)
 $outPlugin = Join-Path $dist 'NWD2DWG.Plugin.dll'
 
 $pluginRefs = @(
@@ -49,13 +55,14 @@ if ($nwDir) {
     $pluginRefs += "$nwDir\Autodesk.Navisworks.Interop.ComApi.dll"
 }
 $pluginRefArgs = $pluginRefs | ForEach-Object { "/r:`"$_`"" }
+$pluginSrcArgs = $pluginSources | ForEach-Object { "`"$_`"" }
 
 $pluginArgs = @(
     "`"$($csc.FullName)`"",
     '/nologo', '/nostdlib+', '/langversion:latest', '/optimize+', '/checked-',
     '/target:library', '/platform:anycpu', '/warn:4', '/utf8output',
     "/out:`"$outPlugin`""
-) + $pluginRefArgs + @("`"$pluginSrc`"")
+) + $pluginRefArgs + $pluginSrcArgs
 
 & dotnet $pluginArgs
 if ($LASTEXITCODE -ne 0) { throw "Компиляция плагина завершилась с кодом $LASTEXITCODE" }
@@ -70,6 +77,15 @@ $refArgs = Get-ChildItem "$refDir\*.dll" |
 $manifest = Join-Path $src 'app.manifest'
 $outExe   = Join-Path $dist 'NWD2DWG.exe'
 
+$exeSources = @(
+    (Join-Path $src 'NWD2DWG.cs'),
+    (Join-Path $src 'MeshDecimator.cs'),
+    (Join-Path $src 'SolidReconstructor.cs'),
+    (Join-Path $src 'GltfWriter.cs'),
+    (Join-Path $src 'IfcWriter.cs')
+)
+$exeSrcArgs = $exeSources | ForEach-Object { "`"$_`"" }
+
 $exeArgs = @(
     "`"$($csc.FullName)`"",
     '/nologo', '/nostdlib+', '/langversion:latest', '/optimize+', '/checked-',
@@ -77,7 +93,7 @@ $exeArgs = @(
     "/resource:`"$outPlugin`",NWD2DWG.Plugin.dll",
     "/win32manifest:`"$manifest`"",
     "/out:`"$outExe`""
-) + $refArgs + @("`"$(Join-Path $src 'NWD2DWG.cs')`"")
+) + $refArgs + $exeSrcArgs
 
 & dotnet $exeArgs
 if ($LASTEXITCODE -ne 0) { throw "Компиляция NWD2DWG.exe завершилась с кодом $LASTEXITCODE" }
@@ -93,7 +109,7 @@ if ($LASTEXITCODE -ne 0) { throw "Самотест провалился (код 
 Write-Host "Самотест OK: $stDir"
 
 # 4. Упаковка ZIP архива с исходным кодом (GNU GPL v3)
-$zipFile = Join-Path $dist 'NWD2DWG_v1.0.zip'
+$zipFile = Join-Path $dist 'NWD2DWG_v2.0.zip'
 $readmeFile = Join-Path $dist 'README_RU.txt'
 $licFile = Join-Path $root 'LICENSE'
 $buildScript = Join-Path $root 'build.ps1'
@@ -106,7 +122,7 @@ New-Item -ItemType Directory -Path (Join-Path $pkgDir "src") | Out-Null
 
 Copy-Item $outExe $pkgDir -Force
 Copy-Item $outPlugin $pkgDir -Force
-Copy-Item $readmeFile $pkgDir -Force
+if (Test-Path $readmeFile) { Copy-Item $readmeFile $pkgDir -Force }
 Copy-Item $licFile $pkgDir -Force
 Copy-Item $buildScript $pkgDir -Force
 Copy-Item (Join-Path $src "*.*") (Join-Path $pkgDir "src") -Force

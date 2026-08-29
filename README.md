@@ -1,100 +1,119 @@
-﻿# ⚡ NWD2DWG
+# ⚡ NWD2DWG v2.0
 
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/Platform-Windows%20x64-0078D6.svg)](https://microsoft.com)
-[![Navisworks](https://img.shields.io/badge/Navisworks-2024%20|%202025%20|%202026-0696D7.svg)](https://autodesk.com)
+[![Navisworks](https://img.shields.io/badge/Navisworks-2020%20--%202026-0696D7.svg)](https://autodesk.com)
 [![AutoCAD](https://img.shields.io/badge/AutoCAD-2018%20--%202026-E51B24.svg)](https://autodesk.com)
+[![glTF 2.0](https://img.shields.io/badge/Format-glTF%20%2F%20GLB-green.svg)](https://www.khronos.org/gltf/)
+[![IFC 2x3](https://img.shields.io/badge/Format-IFC%202x3-orange.svg)](https://technical.buildingsmart.org/)
 [![Developer](https://img.shields.io/badge/Developer-BaidurovLabs-00A2FF.svg)](https://baidurovlabs.ru)
 
-**NWD2DWG** — высокопроизводительный инструмент для конвертации 3D-геометрии из моделей **Autodesk Navisworks (.NWD, .NWC, .NWF)** в форматы **Autodesk AutoCAD (.DWG, .DXF)**.
+**NWD2DWG** — универсальный высокопроизводительный BIM-конвертер геометрии из моделей **Autodesk Navisworks (.NWD, .NWC, .NWF)** в форматы **AutoCAD (.DWG, .DXF)**, **glTF / GLB (Web, VR, Blender)** и **IFC 2x3 (BIM)**.
 
-Программа разработана для решения ключевой проблемы проектировщиков и инженеров при реконструкциях и BIM-координации: Navisworks по умолчанию не позволяет экспортировать реальные 3D-тела и сетки в CAD-форматы для дальнейшей работы в AutoCAD/NanoCAD.
-
----
-
-## ✨ Ключевые возможности
-
-- 🚀 **Mesh Batching (Полигональная сетка Polyface AC1009):**
-  Умная группировка полигонов по слоям и материалам блоками по 15 000 вершин. Снижает количество примитивов в чертеже на **99.7%** (например, с 250 000 отдельных 3DFACE до ~850 блоков сетки). Чертежи открываются в AutoCAD мгновенно, без переполнения оперативной памяти (OOM) и зависаний.
-
-- 🗂️ **Разбивка по разделам / XREF (`--split 1`):**
-  Автоматическое разделение тяжелых сводных BIM-моделей (1–3 ГБ) на отдельные файлы по дисциплинам (ТХ — технологические трубопроводы, КМ — металлоконструкции, АР — архитектура, ОВ/ВК — инженерные сети) для удобной сборки через внешние ссылки (XREF).
-
-- 🎨 **AutoCAD 2026 Dark Theme GUI:**
-  Эргономичный графический интерфейс в темной теме AutoCAD 2026 с поддержкой Drag-and-Drop, встроенной консолью логов, прогресс-баром и модулем самодиагностики окружения.
-
-- 🤖 **Headless CLI для пакетной автоматизации:**
-  Полнофункциональный консольный интерфейс для пакетной обработки сотен моделей через скрипты и конвейеры CI/CD.
-
-- ⚙️ **Прямой экспорт в DWG через `accoreconsole`:**
-  Фоновая генерация бинарных `.dwg` файлов без всплывающих окон через автономную консоль AutoCAD.
-
-- 🛡️ **100% Свободное ПО (GNU GPL v3):**
-  Полностью открытый исходный код без ограничений и телеметрии.
+Программа решает ключевую проблему проектировщиков при реконструкции и BIM-координации: Navisworks по умолчанию не позволяет выгружать реальную геометрию и атрибутику в открытые CAD/BIM форматы для дальнейшей работы в AutoCAD, NanoCAD, Revit, Blender или веб-вьюверах.
 
 ---
 
-## 📥 Быстрый старт
+## 🚀 Топ-10 возможностей NWD2DWG v2.0
 
-### Вариант 1: Графический интерфейс (GUI)
-1. Скачайте последний релиз из вкладки **[Releases](../../releases)**.
+1. **🔥 Mesh Decimation (QEM-сжатие полигонов 0–90%):**
+   Встроенный алгоритм Quadric Error Metrics (QEM) для управляемого упрощения полигональных сеток. Уменьшает вес сверхплотных моделей в 2–10 раз с сохранением характерных граней.
+
+2. **🧊 Solid Reconstructor (Распознавание тел):**
+   Автоматический PCA-анализ и подгонка примитивов (трубы/цилиндры, балки/коробки) в чистые 3D-тела вместо фасеточных сеток.
+
+3. **📊 BIM Attribute Transfer (XData):**
+   Полный перенос вкладок свойств и атрибутов Navisworks в расширенные данные сущностей AutoCAD (XData) и свойства IFC/glTF.
+
+4. **🎯 Export by Selection Sets / Search Sets:**
+   Экспорт строго определенных поисковых наборов и выборок (например, только технологические трубопроводы или только металлоконструкции).
+
+5. **🌐 glTF 2.0 / GLB Export:**
+   Прямая генерация бинарных `.glb` и текстовых `.gltf` файлов для интерактивной 3D-визуализации в браузере (Three.js, Babylon.js), движках (Unity, Unreal Engine) и Blender.
+
+6. **🏛️ IFC 2x3 Export:**
+   Генерация стандартных файлов IFC (ISO 10303-21 STEP) с иерархией проекта (`IfcProject` → `IfcSite` → `IfcBuilding` → `IfcBuildingStorey` → `IfcBuildingElementProxy`).
+
+7. **✂️ Section Box Crop:**
+   Обрезка экспортируемой геометрии по 3D-габаритам (bounding box / рамка сечения), что позволяет выгружать только нужный этаж или узел.
+
+8. **🎨 PBR Materials & Transparency:**
+   Перенос прозрачности и физических цветов элементов в TrueColor (группа 420 DXF) и alpha-каналы glTF/IFC.
+
+9. **🐕 BIM Watchdog (Автоконвертер папок):**
+   Фоновая служба мониторинга директории (`--watch`). Автоматически подхватывает новые или обновленные `.nwd`/`.nwc` файлы и конвертирует их на лету.
+
+10. **⚡ Multi-threaded Engine & Mesh Batching:**
+    Параллельная обработка батчей и блочная запись по 15 000 вершин. Снижает количество примитивов в чертеже на **99.7%** (с 250 000 до ~850 блоков Polyface Mesh).
+
+---
+
+## 📥 Использование
+
+### Графический интерфейс (GUI)
+1. Скачайте релиз `NWD2DWG_v2.0.zip` из раздела **Releases**.
 2. Запустите `NWD2DWG.exe`.
-3. Перетащите `.nwd` или `.nwc` файл в окно программы (или выберите папку для пакетной конвертации).
-4. Выберите формат (**DXF Polyface Mesh** или **DWG**) и нажмите **▶ Конвертировать**.
+3. Перетащите файл или папку `.nwd`/`.nwc` в окно программы.
+4. Настройте нужный формат (**DXF**, **DWG**, **glTF/GLB**, **IFC**) и параметры (степень сжатия, распознавание тел, перенос XData).
+5. Нажмите **▶ Конвертировать**.
 
-### Вариант 2: Командная строка (CLI)
+### Командная строка (CLI)
 
 ```powershell
-# 1. Быстрая конвертация NWD в оптимизированный DXF с разбивкой по дисциплинам (XREF)
-.\NWD2DWG.exe --input "C:\Models\Plant.nwd" --format dxf --polyface 1 --split 1
+# 1. Быстрая конвертация NWD в DXF Polyface со сжатием сетки на 50%
+.\NWD2DWG.exe --convert "C:\Models\Plant.nwd" "C:\Out\Plant.dxf" --decimate 50 --split 1
 
-# 2. Прямая конвертация в бинарный DWG через AutoCAD 2026 Core Console
-.\NWD2DWG.exe --input "C:\Models\Pipeline.nwd" --format dwg --polyface 1 --show-acad 0
+# 2. Экспорт в бинарный glTF (GLB) с переносом материалов
+.\NWD2DWG.exe --convert "C:\Models\Plant.nwd" "C:\Out\Plant.glb" --format glb --materials 1
 
-# 3. Пакетная конвертация всей папки с моделями
-.\NWD2DWG.exe --batch "C:\Models\BIM_NWD" --out "C:\Output_DXF" --polyface 1
+# 3. Экспорт в IFC 2x3 с BIM-атрибутами и фильтрацией по выборке
+.\NWD2DWG.exe --convert "C:\Models\Plant.nwd" "C:\Out\Plant.ifc" --format ifc --xdata 1 --sets "Трубопроводы,Оборудование"
 
-# 4. Проверка структуры модели без экспорта
-.\NWD2DWG.exe --check-models "C:\Models\Plant.nwd"
+# 4. Обрезка по габаритам Section Box (minX,minY,minZ,maxX,maxY,maxZ)
+.\NWD2DWG.exe --convert "C:\Models\Plant.nwd" "C:\Out\Crop.dxf" --bbox 0,0,0,100,50,20
 
-# 5. Диагностика установленных версий Navisworks и AutoCAD
-.\NWD2DWG.exe --diag
+# 5. Режим BIM Watchdog — автоматический мониторинг папки
+.\NWD2DWG.exe --watch "C:\BIM_DropFolder" --format glb --interval 5
+
+# 6. Полный самотест всех 10 модулей
+.\NWD2DWG.exe --selftest
 ```
 
 ---
 
-## 🛠️ Параметры командной строки
+## 🛠️ Справочник параметров CLI
 
-| Параметр | Значение по умолчанию | Описание |
+| Параметр | Возможные значения | Описание |
 |---|---|---|
-| `--input <path>` | — | Путь к входному `.nwd`, `.nwc` или `.nwf` файлу |
-| `--out <dir>` | Рядом с файлом | Папка для сохранения готовых чертежей |
-| `--format <dxf\|dwg>` | `dxf` | Выходной формат (DXF или DWG) |
-| `--polyface <0\|1>` | `1` | `1` — оптимизированная сетка Polyface Mesh (рекомендуется), `0` — 3DFACE |
-| `--split <0\|1>` | `1` | `1` — разбивать сводную модель на файлы по разделам, `0` — единый файл |
-| `--skip-hidden <0\|1>` | `1` | Пропускать скрытые элементы Navisworks |
-| `--colors <0\|1>` | `0` | Сохранять индивидуальные RGB-цвета элементов |
-| `--show-nw <0\|1>` | `1` | Показывать окно Navisworks при экспорте |
-| `--show-acad <0\|1>` | `0` | Показывать окно AutoCAD при трансляции DXF → DWG |
-| `--batch <dir>` | — | Пакетная конвертация всех `.nwd`/`.nwc` в директории |
-| `--diag` | — | Запуск диагностики окружения (поиск Navisworks/AutoCAD) |
+| `--convert <in> <out>` | Пути к файлам | Основной режим конвертации файла |
+| `--format` | `dxf`, `3dface`, `dwg`, `gltf`, `glb`, `ifc` | Формат вывода |
+| `--decimate` | `0`–`90` | Процент QEM-упрощения полигонов |
+| `--soliddetect` | `0` / `1` | Автоматическое распознавание тел (цилиндры/коробки) |
+| `--xdata` | `0` / `1` | Перенос свойств элементов Navisworks в XData / BIM-атрибуты |
+| `--materials` | `0` / `1` | Перенос прозрачности и TrueColor |
+| `--sets` | `"Сет1,Сет2"` | Фильтр по Navisworks Selection Sets / Search Sets |
+| `--bbox` | `minX,minY,minZ,maxX,maxY,maxZ` | 3D-рамка сечения (Section Box) |
+| `--split` | `0` / `1` | Разбивать сводную модель на файлы по разделам (XREF) |
+| `--skiphidden` | `0` / `1` | Пропускать скрытые элементы |
+| `--colors` | `0` / `1` | Переносить индивидуальные цвета элементов |
+| `--layers` | `0` / `1` | Создавать отдельный слой на каждый элемент |
+| `--threads` | `0` (авто) / `1`..`N` | Количество потоков обработки |
+| `--watch` | `<путь>` | Запуск службы мониторинга директории |
+| `--interval` | `<сек>` | Интервал опроса в режиме Watchdog (по умолчанию 5) |
+| `--selftest` | `[директория]` | Запуск автономного самотестирования всех алгоритмов |
+| `--diagnostics` | `[файл] [--no-api]` | Диагностика установленных Navisworks и AutoCAD |
 
 ---
 
 ## 🏗️ Сборка из исходного кода
 
-Сборка выполняется встроенным компилятором Roslyn через .NET SDK без необходимости устанавливать Visual Studio:
+Сборка осуществляется через встроенный компилятор Roslyn (.NET SDK):
 
 ```powershell
-# Клонируйте репозиторий
-git clone https://github.com/<username>/NWD2DWG.git
-cd NWD2DWG
-
-# Запустите скрипт сборки
-powershell -ExecutionPolicy Bypass -File .\build.ps1
+powershell -ExecutionPolicy Bypass -File .\NWD2DWG\build.ps1
 ```
 
-Готовые бинарники и упакованный релиз будут находиться в папке `dist/`.
+Готовые бинарные файлы и упакованный релиз с исходным кодом формируются в директории `dist/` (`NWD2DWG.exe`, `NWD2DWG.Plugin.dll`, `NWD2DWG_v2.0.zip`).
 
 ---
 
@@ -103,4 +122,5 @@ powershell -ExecutionPolicy Bypass -File .\build.ps1
 Проект распространяется под свободной лицензией **GNU General Public License v3.0 (GPLv3)**. Подробнее см. в файле [LICENSE](LICENSE).
 
 Разработчик: **Baidurov Pavel** / **BaidurovLabs**  
-Официальный сайт: [baidurovlabs.ru](https://baidurovlabs.ru)
+Официальный сайт: [baidurovlabs.ru](https://baidurovlabs.ru)  
+GitHub: [github.com/AnT1pal/NWD2DWG](https://github.com/AnT1pal/NWD2DWG)

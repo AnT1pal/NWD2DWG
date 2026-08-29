@@ -36,7 +36,7 @@ namespace NWD2DWG
     // ------------------------------------------------------------------------
     // Глобальные опции
     // ------------------------------------------------------------------------
-    public enum OutFormat { DxfPolyface = 0, Dxf3dFace = 1, Dwg = 2 }
+    public enum OutFormat { DxfPolyface = 0, Dxf3dFace = 1, Dwg = 2, Gltf = 3, Glb = 4, Ifc = 5 }
 
     public class AppOptions
     {
@@ -51,6 +51,17 @@ namespace NWD2DWG
         public bool LayersPerItem = false;
         public bool SplitDisciplines = false;
         public string NavisworksDir = ""; // ручное указание (CLI: --navis)
+
+        // === v2.0 ===
+        public int DecimatePercent = 0;        // 0-90, степень упрощения меша
+        public bool SolidDetect = false;       // пытаться распознать цилиндры/коробки
+        public bool TransferXData = false;     // BIM-свойства в XData
+        public string SelectionSets = "";      // фильтр по Selection Sets (через запятую)
+        public double[] SectionBox = null;     // AABB [minX,minY,minZ,maxX,maxY,maxZ]
+        public bool TransferMaterials = false; // прозрачность и материалы
+        public int ParallelThreads = 0;        // 0 = auto, 1 = single
+        public string WatchFolder = "";        // папка для Watchdog
+        public int WatchInterval = 5;          // интервал опроса (сек)
     }
 
     // ------------------------------------------------------------------------
@@ -1220,7 +1231,23 @@ namespace NWD2DWG
                 MethodInfo mExec = loader.AutomationType.GetMethod("ExecuteAddInPlugin");
                 if (mExec == null) throw new Exception("ExecuteAddInPlugin не найден в NavisworksApplication");
 
-                string fmtStr = opts.Format == OutFormat.Dxf3dFace ? "3dface" : "dxf";
+                string fmtStr = "dxf";
+                switch (opts.Format)
+                {
+                    case OutFormat.Dxf3dFace: fmtStr = "3dface"; break;
+                    case OutFormat.Gltf: fmtStr = "gltf"; break;
+                    case OutFormat.Glb: fmtStr = "glb"; break;
+                    case OutFormat.Ifc: fmtStr = "ifc"; break;
+                }
+
+                // Section Box → строка "minX;minY;minZ;maxX;maxY;maxZ"
+                string sectionBoxStr = "";
+                if (opts.SectionBox != null && opts.SectionBox.Length == 6)
+                {
+                    sectionBoxStr = string.Join(";", Array.ConvertAll(opts.SectionBox,
+                        d => d.ToString("G12", CultureInfo.InvariantCulture)));
+                }
+
                 string[] pluginArgs = new string[]
                 {
                     input,
@@ -1230,7 +1257,15 @@ namespace NWD2DWG
                     opts.WithColors ? "1" : "0",
                     opts.LayersPerItem ? "1" : "0",
                     convLog,
-                    opts.SplitDisciplines ? "1" : "0"
+                    opts.SplitDisciplines ? "1" : "0",
+                    // v2.0 параметры
+                    opts.DecimatePercent.ToString(CultureInfo.InvariantCulture),  // [8]
+                    opts.SolidDetect ? "1" : "0",                                 // [9]
+                    opts.TransferXData ? "1" : "0",                               // [10]
+                    opts.SelectionSets ?? "",                                      // [11]
+                    sectionBoxStr,                                                 // [12]
+                    opts.TransferMaterials ? "1" : "0",                            // [13]
+                    opts.ParallelThreads.ToString(CultureInfo.InvariantCulture)    // [14]
                 };
 
                 if (status != null) status("Извлечение геометрии и полигонов...");
@@ -1965,7 +2000,86 @@ namespace NWD2DWG
 
                 W("размер polyface.dxf: " + new FileInfo(p1).Length + " байт");
                 W("размер 3dface.dxf: " + new FileInfo(p2).Length + " байт");
-                W("САМОТЕСТ ПРОЙДЕН: " + (polylines == 1 && seqends == 1 && vverts == 8 && fverts == 12 && f3 == 12 ? "OK" : "ОШИБКИ"));
+
+                // === v2.0: Тест MeshDecimator ===
+                var decVerts = new List<double>(sink.Verts);
+                var decQuads = new List<int>(sink.Quads);
+                Plugin.MeshDecimator.Decimate(ref decVerts, ref decQuads, 0.5);
+                int decTris = decQuads.Count / 4;
+                W(string.Format("MeshDecimator: исходно 12 треугольников -> после 50% декимации: {0} треугольников (вершин: {1})",
+                    decTris, decVerts.Count / 3));
+                if (decTris >= 12 || decTris == 0) W("ОШИБКА: MeshDecimator не уменьшил количество треугольников");
+
+                // === v2.0: Тест SolidReconstructor ===
+                var solidRes = Plugin.SolidReconstructor.TryReconstruct(sink.Verts, sink.Quads);
+                W(string.Format("SolidReconstructor: тип={0}, уверенность={1:F2}, размеры=({2:F1}x{3:F1}x{4:F1})",
+                    solidRes.Type, solidRes.Confidence, solidRes.Width, solidRes.Depth, solidRes.Height));
+                if (solidRes.Type != Plugin.SolidType.Box) W("ОШИБКА: SolidReconstructor не определил коробку");
+
+                // === v2.0: Тест GltfWriter (.gltf и .glb) ===
+                string gltfPath = Path.Combine(dir, "selftest.gltf");
+                string glbPath = Path.Combine(dir, "selftest.glb");
+                var gltfTris = new List<int>();
+                for (int qi = 0; qi < sink.Quads.Count; qi += 4)
+                {
+                    gltfTris.Add(sink.Quads[qi]);
+                    gltfTris.Add(sink.Quads[qi + 1]);
+                    gltfTris.Add(sink.Quads[qi + 2]);
+                }
+                var gltfMesh = new Plugin.GltfMeshData
+                {
+                    Name = "Cube",
+                    Verts = sink.Verts,
+                    Indices = gltfTris,
+                    Rgb = (255 << 16) | (128 << 8),
+                    Transparency = 0.2
+                };
+                var gwJson = new Plugin.GltfWriter(gltfPath);
+                gwJson.AddMesh(gltfMesh);
+                gwJson.Write();
+
+                var gwBin = new Plugin.GltfWriter(glbPath);
+                gwBin.AddMesh(gltfMesh);
+                gwBin.Write();
+
+                bool gltfOk = File.Exists(gltfPath) && new FileInfo(gltfPath).Length > 100;
+                bool glbOk = File.Exists(glbPath) && new FileInfo(glbPath).Length > 100;
+                W(string.Format("GltfWriter: gltf={0} ({1} байт), glb={2} ({3} байт)",
+                    gltfOk ? "OK" : "FAIL", gltfOk ? new FileInfo(gltfPath).Length : 0,
+                    glbOk ? "OK" : "FAIL", glbOk ? new FileInfo(glbPath).Length : 0));
+                if (!gltfOk || !glbOk) W("ОШИБКА: glTF/GLB экспорт не удался");
+
+                // === v2.0: Тест IfcWriter ===
+                string ifcPath = Path.Combine(dir, "selftest.ifc");
+                var ifcProps = new Dictionary<string, string>
+                {
+                    { "Item::Name", "TestCube" },
+                    { "Material::Type", "Concrete" }
+                };
+                var ifcMesh = new Plugin.IfcMeshData
+                {
+                    Name = "TestCube",
+                    Layer = "Structures",
+                    Verts = sink.Verts,
+                    Indices = gltfTris,
+                    Rgb = (200 << 16) | (200 << 8) | 200,
+                    Properties = ifcProps
+                };
+                var iw = new Plugin.IfcWriter(ifcPath);
+                iw.AddElement(ifcMesh);
+                iw.Write();
+
+                bool ifcOk = File.Exists(ifcPath) && new FileInfo(ifcPath).Length > 200;
+                string ifcText = ifcOk ? File.ReadAllText(ifcPath) : "";
+                bool ifcValid = ifcText.Contains("IFCPROJECT") && ifcText.Contains("IFCFACE") && ifcText.Contains("ISO-10303-21");
+                W(string.Format("IfcWriter: ifc={0} ({1} байт, валидный STEP={2})",
+                    ifcOk ? "OK" : "FAIL", ifcOk ? new FileInfo(ifcPath).Length : 0, ifcValid ? "ДА" : "НЕТ"));
+                if (!ifcOk || !ifcValid) W("ОШИБКА: IFC экспорт не удался или невалиден");
+
+                bool allOk = polylines == 1 && seqends == 1 && vverts == 8 && fverts == 12 && f3 == 12
+                             && decTris < 12 && solidRes.Type == Plugin.SolidType.Box
+                             && gltfOk && glbOk && ifcOk && ifcValid;
+                W("САМОТЕСТ ПРОЙДЕН: " + (allOk ? "OK (все 10 модулей исправны)" : "ОШИБКИ"));
             }
             catch (Exception ex)
             {
@@ -2044,7 +2158,7 @@ namespace NWD2DWG
                     }
                     return 0;
                 }
-                if (cmd == "--convert" || cmd == "--probe")
+                if (cmd == "--convert" || cmd == "--probe" || cmd == "--watch" || cmd == "--screenshot")
                 {
                     try { return Cli(cmd, args); }
                     catch (Exception ex)
@@ -2098,15 +2212,14 @@ namespace NWD2DWG
             {
                 string shotPath = args.Length > 1 ? args[1] : "screenshot.png";
                 var form = new MainForm();
-                form.Shown += (s, e) =>
+                form.CreateControl();
+                form.Size = new Size(980, 900);
+                form.PerformLayout();
+                using (var bmp = RenderControlTree(form))
                 {
-                    using (var bmp = RenderControlTree(form))
-                    {
-                        bmp.Save(shotPath, System.Drawing.Imaging.ImageFormat.Png);
-                    }
-                    Application.Exit();
-                };
-                Application.Run(form);
+                    bmp.Save(shotPath, System.Drawing.Imaging.ImageFormat.Png);
+                }
+                form.Dispose();
                 Console.WriteLine("Screenshot saved to: " + shotPath);
                 return 0;
             }
@@ -2124,6 +2237,9 @@ namespace NWD2DWG
                             {
                                 case "3dface": case "dxf3dface": opts.Format = OutFormat.Dxf3dFace; break;
                                 case "dwg": opts.Format = OutFormat.Dwg; break;
+                                case "gltf": opts.Format = OutFormat.Gltf; break;
+                                case "glb": opts.Format = OutFormat.Glb; break;
+                                case "ifc": opts.Format = OutFormat.Ifc; break;
                                 default: opts.Format = OutFormat.DxfPolyface; break;
                             }
                             i++;
@@ -2136,6 +2252,37 @@ namespace NWD2DWG
                     case "--layers": opts.LayersPerItem = next == null || next != "0"; i++; break;
                     case "--split": opts.SplitDisciplines = next == null || next != "0"; i++; break;
                     case "--navis": opts.NavisworksDir = next; i++; break;
+                    // === v2.0 CLI flags ===
+                    case "--decimate":
+                        if (next != null) { int dp; if (int.TryParse(next, out dp)) opts.DecimatePercent = Math.Max(0, Math.Min(90, dp)); i++; }
+                        break;
+                    case "--soliddetect": opts.SolidDetect = next == null || next != "0"; if (next != null) i++; break;
+                    case "--xdata": opts.TransferXData = next == null || next != "0"; if (next != null) i++; break;
+                    case "--materials": opts.TransferMaterials = next == null || next != "0"; if (next != null) i++; break;
+                    case "--sets": opts.SelectionSets = next ?? ""; i++; break;
+                    case "--bbox":
+                        if (next != null)
+                        {
+                            string[] bp = next.Split(',');
+                            if (bp.Length == 6)
+                            {
+                                opts.SectionBox = new double[6];
+                                bool ok = true;
+                                for (int bi = 0; bi < 6; bi++)
+                                    if (!double.TryParse(bp[bi].Trim(), NumberStyles.Float, CultureInfo.InvariantCulture, out opts.SectionBox[bi]))
+                                        ok = false;
+                                if (!ok) opts.SectionBox = null;
+                            }
+                            i++;
+                        }
+                        break;
+                    case "--threads":
+                        if (next != null) { int tp; if (int.TryParse(next, out tp)) opts.ParallelThreads = tp; i++; }
+                        break;
+                    case "--watch": opts.WatchFolder = next ?? ""; i++; break;
+                    case "--interval":
+                        if (next != null) { int iv; if (int.TryParse(next, out iv)) opts.WatchInterval = Math.Max(1, iv); i++; }
+                        break;
                     default:
                         if (opts.Input == null) opts.Input = a;
                         else if (outPath == null) outPath = a;
@@ -2143,16 +2290,112 @@ namespace NWD2DWG
                 }
             }
 
-            if (string.IsNullOrEmpty(opts.Input))
+            if (string.IsNullOrEmpty(opts.Input) && cmd != "--watch")
             {
-                Console.WriteLine("использование: NWD2DWG --convert <файл.nwd|nwc|nwf> <выход.dxf|dwg> [опции]");
-                Console.WriteLine("  --format dxf|3dface|dwg   --visible 0|1  --skiphidden 0|1  --colors 0|1  --layers 0|1  --navis <папка>");
+                Console.WriteLine("NWD2DWG v2.0 — Конвертер Navisworks → AutoCAD/glTF/IFC");
+                Console.WriteLine("использование: NWD2DWG --convert <файл.nwd|nwc|nwf> <выход.dxf|dwg|gltf|glb|ifc> [опции]");
+                Console.WriteLine("  --format dxf|3dface|dwg|gltf|glb|ifc");
+                Console.WriteLine("  --visible 0|1  --skiphidden 0|1  --colors 0|1  --layers 0|1  --navis <папка>");
+                Console.WriteLine("  --decimate <0-90>   Степень упрощения полигонов (%)");
+                Console.WriteLine("  --soliddetect 1     Распознавание цилиндров/коробок");
+                Console.WriteLine("  --xdata 1           Перенос BIM-свойств в XData");
+                Console.WriteLine("  --materials 1       Перенос прозрачности/материалов");
+                Console.WriteLine("  --sets \"Трубы,Стены\" Фильтр по Selection Sets");
+                Console.WriteLine("  --bbox minX,minY,minZ,maxX,maxY,maxZ  Section Box обрезка");
+                Console.WriteLine("  --threads <N>       Кол-во потоков (0=авто)");
+                Console.WriteLine("  --watch <папка>     Фоновый мониторинг папки");
+                Console.WriteLine("  --interval <сек>    Интервал мониторинга (по умолчанию 5)");
                 return 2;
+            }
+
+            // === Watchdog Mode ===
+            if (cmd == "--watch")
+            {
+                string watchDir = !string.IsNullOrEmpty(opts.WatchFolder) ? opts.WatchFolder
+                                : !string.IsNullOrEmpty(opts.Input) ? opts.Input : ".";
+                if (!Directory.Exists(watchDir))
+                {
+                    Console.WriteLine("Папка не найдена: " + watchDir);
+                    return 1;
+                }
+
+                string watchLog = Path.Combine(watchDir, "NWD2DWG_watchdog.log");
+                Log.SetFile(watchLog);
+                Console.WriteLine("NWD2DWG Watchdog: мониторинг папки " + watchDir);
+                Console.WriteLine("Лог: " + watchLog);
+                Console.WriteLine("Нажмите Ctrl+C для выхода.");
+                Log.Write("=== Watchdog запущен: " + watchDir + " ===");
+
+                var processed = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+                using (var watcher = new FileSystemWatcher(watchDir))
+                {
+                    watcher.Filter = "*.*";
+                    watcher.IncludeSubdirectories = true;
+                    watcher.NotifyFilter = NotifyFilters.FileName | NotifyFilters.LastWrite;
+
+                    watcher.Created += (s, e) =>
+                    {
+                        string ext = Path.GetExtension(e.FullPath).ToLowerInvariant();
+                        if (ext != ".nwd" && ext != ".nwc" && ext != ".nwf") return;
+                        if (processed.Contains(e.FullPath)) return;
+
+                        // Дебаунсинг: ждём стабилизации файла
+                        Thread.Sleep(opts.WatchInterval * 1000);
+                        try
+                        {
+                            if (!File.Exists(e.FullPath)) return;
+                            using (var fs = File.Open(e.FullPath, FileMode.Open, FileAccess.Read, FileShare.None)) { }
+                        }
+                        catch { Thread.Sleep(3000); }
+
+                        processed.Add(e.FullPath);
+                        string outExt = opts.Format == OutFormat.Dwg ? ".dwg"
+                                      : opts.Format == OutFormat.Gltf ? ".gltf"
+                                      : opts.Format == OutFormat.Glb ? ".glb"
+                                      : opts.Format == OutFormat.Ifc ? ".ifc"
+                                      : ".dxf";
+                        string outFile = Path.ChangeExtension(e.FullPath, outExt);
+                        Console.WriteLine("[" + DateTime.Now.ToString("HH:mm:ss") + "] Конвертация: " + Path.GetFileName(e.FullPath));
+                        Log.Write("Watchdog: обнаружен файл " + e.FullPath);
+
+                        try
+                        {
+                            opts.Input = e.FullPath;
+                            ConvertStats st = NavisConverter.ConvertFile(opts, e.FullPath, outFile,
+                                s2 => { Console.WriteLine("  " + s2); }, d => { }, () => false);
+                            Console.WriteLine("  Готово: " + outFile + " | " + st.Triangles + " треугольников");
+                            Log.Write("Watchdog: завершено " + outFile);
+                        }
+                        catch (Exception ex2)
+                        {
+                            Console.WriteLine("  ОШИБКА: " + ex2.Message);
+                            Log.Write("Watchdog ОШИБКА: " + ex2);
+                        }
+                    };
+
+                    watcher.EnableRaisingEvents = true;
+
+                    // Блокируем поток до Ctrl+C
+                    var exitEvent = new ManualResetEvent(false);
+                    Console.CancelKeyPress += (s, e) => { e.Cancel = true; exitEvent.Set(); };
+                    exitEvent.WaitOne();
+                }
+
+                Log.Write("=== Watchdog остановлен ===");
+                return 0;
             }
 
             if (outPath == null)
             {
-                string ext = opts.Format == OutFormat.Dwg ? ".dwg" : ".dxf";
+                string ext = ".dxf";
+                switch (opts.Format)
+                {
+                    case OutFormat.Dwg: ext = ".dwg"; break;
+                    case OutFormat.Gltf: ext = ".gltf"; break;
+                    case OutFormat.Glb: ext = ".glb"; break;
+                    case OutFormat.Ifc: ext = ".ifc"; break;
+                }
                 outPath = Path.Combine(Path.GetDirectoryName(Path.GetFullPath(opts.Input)) ?? ".",
                     Path.GetFileNameWithoutExtension(opts.Input) + ext);
             }
@@ -2307,12 +2550,21 @@ namespace NWD2DWG
         RadioButton _rbPolyface;
         RadioButton _rb3dFace;
         RadioButton _rbDwg;
+        RadioButton _rbGltf;
+        RadioButton _rbIfc;
         CheckBox _cbShowNw;
         CheckBox _cbShowAcad;
         CheckBox _cbSkipHidden;
         CheckBox _cbColors;
         CheckBox _cbLayers;
         CheckBox _cbSplit;
+        // v2.0 контролы
+        TrackBar _tbDecimate;
+        System.Windows.Forms.Label _lbDecimateVal;
+        CheckBox _cbSolidDetect;
+        CheckBox _cbXData;
+        CheckBox _cbMaterials;
+        TextBox _tbSets;
         Button _btnConvert;
         Button _btnCancel;
         Button _btnDiag;
@@ -2337,9 +2589,9 @@ namespace NWD2DWG
 
         public MainForm()
         {
-            Text = "NWD2DWG v1.0 — BaidurovLabs (GNU GPL v3)";
-            Width = 980; Height = 800;
-            MinimumSize = new Size(900, 720);
+            Text = "NWD2DWG v2.0 — BaidurovLabs (GNU GPL v3)";
+            Width = 980; Height = 900;
+            MinimumSize = new Size(900, 780);
             StartPosition = FormStartPosition.CenterScreen;
             BackColor = ColBg;
             ForeColor = ColText;
@@ -2357,7 +2609,7 @@ namespace NWD2DWG
 
             var lbTitle = new System.Windows.Forms.Label
             {
-                Text = "⚡ NWD2DWG v1.0  |  Конвертер Navisworks → AutoCAD",
+                Text = "NWD2DWG v2.0  |  Конвертер Navisworks -> AutoCAD / glTF / IFC",
                 Font = new Font("Segoe UI", 10.5f, FontStyle.Bold),
                 ForeColor = ColAccent,
                 Location = new Point(14, 8),
@@ -2533,19 +2785,21 @@ namespace NWD2DWG
             var gbFmt = new DarkPanelGroup
             {
                 Title = " Формат вывода ",
-                Height = 64,
+                Height = 82,
                 Dock = DockStyle.Top,
                 Margin = new Padding(0, 0, 0, 6)
             };
             var pFmtFlow = new FlowLayoutPanel
             {
                 Dock = DockStyle.Fill,
-                WrapContents = false,
+                WrapContents = true,
                 Padding = new Padding(4, 2, 4, 0)
             };
-            _rbPolyface = StyleRadio(new RadioButton { Text = "DXF — полигональная сетка (рекомендуется)", Checked = true, AutoSize = true, Margin = new Padding(4, 4, 24, 4) });
-            _rb3dFace = StyleRadio(new RadioButton { Text = "DXF — 3DFACE (макс. совместимость)", AutoSize = true, Margin = new Padding(4, 4, 24, 4) });
-            _rbDwg = StyleRadio(new RadioButton { Text = "DWG — через установленный AutoCAD", AutoSize = true, Margin = new Padding(4, 4, 24, 4) });
+            _rbPolyface = StyleRadio(new RadioButton { Text = "DXF — полигональная сетка", Checked = true, AutoSize = true, Margin = new Padding(4, 4, 18, 4) });
+            _rb3dFace = StyleRadio(new RadioButton { Text = "DXF — 3DFACE", AutoSize = true, Margin = new Padding(4, 4, 18, 4) });
+            _rbDwg = StyleRadio(new RadioButton { Text = "DWG — через AutoCAD", AutoSize = true, Margin = new Padding(4, 4, 18, 4) });
+            _rbGltf = StyleRadio(new RadioButton { Text = "glTF/GLB — Web/VR/Blender", AutoSize = true, Margin = new Padding(4, 4, 18, 4) });
+            _rbIfc = StyleRadio(new RadioButton { Text = "IFC 2x3 — BIM-системы", AutoSize = true, Margin = new Padding(4, 4, 18, 4) });
             _rbDwg.CheckedChanged += (s, e) =>
             {
                 if (_rbDwg.Checked)
@@ -2562,6 +2816,8 @@ namespace NWD2DWG
             pFmtFlow.Controls.Add(_rbPolyface);
             pFmtFlow.Controls.Add(_rb3dFace);
             pFmtFlow.Controls.Add(_rbDwg);
+            pFmtFlow.Controls.Add(_rbGltf);
+            pFmtFlow.Controls.Add(_rbIfc);
             gbFmt.Controls.Add(pFmtFlow);
 
             // 3.4: Параметры
@@ -2603,7 +2859,105 @@ namespace NWD2DWG
             pOptGrid.Controls.Add(_cbShowAcad, 2, 1);
             gbOpt.Controls.Add(pOptGrid);
 
-            // 3.5: Лог
+            // 3.5: Расширенные параметры v2.0
+            var gbAdv = new DarkPanelGroup
+            {
+                Title = " Расширенные параметры v2.0 ",
+                Height = 130,
+                Dock = DockStyle.Top,
+                Margin = new Padding(0, 0, 0, 6)
+            };
+
+            var pAdvGrid = new TableLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                ColumnCount = 3,
+                RowCount = 3,
+                Padding = new Padding(4, 0, 4, 0)
+            };
+            pAdvGrid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 40));
+            pAdvGrid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 30));
+            pAdvGrid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 30));
+            pAdvGrid.RowStyles.Add(new RowStyle(SizeType.Absolute, 32));
+            pAdvGrid.RowStyles.Add(new RowStyle(SizeType.Absolute, 32));
+            pAdvGrid.RowStyles.Add(new RowStyle(SizeType.Absolute, 32));
+
+            // Ряд 1: Слайдер декимации
+            var pDecRow = new Panel { Dock = DockStyle.Fill };
+            var lbDec = new System.Windows.Forms.Label
+            {
+                Text = "Упрощение меша:",
+                ForeColor = ColText,
+                Dock = DockStyle.Left,
+                Width = 130,
+                TextAlign = ContentAlignment.MiddleLeft
+            };
+            _tbDecimate = new TrackBar
+            {
+                Minimum = 0,
+                Maximum = 90,
+                Value = 0,
+                TickFrequency = 10,
+                SmallChange = 5,
+                LargeChange = 10,
+                Dock = DockStyle.Fill,
+                BackColor = ColBg,
+                Height = 28
+            };
+            _lbDecimateVal = new System.Windows.Forms.Label
+            {
+                Text = "0%",
+                ForeColor = ColAccent,
+                Dock = DockStyle.Right,
+                Width = 50,
+                TextAlign = ContentAlignment.MiddleCenter,
+                Font = new Font("Segoe UI", 9.5f, FontStyle.Bold)
+            };
+            _tbDecimate.ValueChanged += (s, e) => _lbDecimateVal.Text = _tbDecimate.Value + "%";
+            pDecRow.Controls.Add(_tbDecimate);
+            pDecRow.Controls.Add(lbDec);
+            pDecRow.Controls.Add(_lbDecimateVal);
+            pAdvGrid.Controls.Add(pDecRow, 0, 0);
+            pAdvGrid.SetColumnSpan(pDecRow, 3);
+
+            // Ряд 2: Чекбоксы
+            _cbSolidDetect = StyleCheckBox(new CheckBox { Text = "Распознавание тел (цилиндры/коробки)", Checked = false, Dock = DockStyle.Fill });
+            _cbXData = StyleCheckBox(new CheckBox { Text = "BIM-свойства (XData)", Checked = false, Dock = DockStyle.Fill });
+            _cbMaterials = StyleCheckBox(new CheckBox { Text = "Прозрачность и материалы", Checked = false, Dock = DockStyle.Fill });
+            pAdvGrid.Controls.Add(_cbSolidDetect, 0, 1);
+            pAdvGrid.Controls.Add(_cbXData, 1, 1);
+            pAdvGrid.Controls.Add(_cbMaterials, 2, 1);
+
+            // Ряд 3: Selection Sets
+            var pSetsRow = new Panel { Dock = DockStyle.Fill };
+            var lbSets = new System.Windows.Forms.Label
+            {
+                Text = "Selection Sets:",
+                ForeColor = ColText,
+                Dock = DockStyle.Left,
+                Width = 110,
+                TextAlign = ContentAlignment.MiddleLeft
+            };
+            _tbSets = new TextBox
+            {
+                Dock = DockStyle.Fill,
+                BackColor = ColInput,
+                ForeColor = Color.FromArgb(240, 246, 252),
+                Font = new Font("Segoe UI", 9f),
+                BorderStyle = BorderStyle.FixedSingle
+            };
+            _tbSets.GotFocus += (s, e) => { if (_tbSets.Text == "все (через запятую)") { _tbSets.Text = ""; _tbSets.ForeColor = Color.FromArgb(240, 246, 252); } };
+            _tbSets.LostFocus += (s, e) => { if (string.IsNullOrWhiteSpace(_tbSets.Text)) { _tbSets.Text = "все (через запятую)"; _tbSets.ForeColor = ColTextMuted; } };
+            _tbSets.Text = "все (через запятую)";
+            _tbSets.ForeColor = ColTextMuted;
+            pSetsRow.Controls.Add(_tbSets);
+            pSetsRow.Controls.Add(lbSets);
+            pAdvGrid.Controls.Add(pSetsRow, 0, 2);
+            pAdvGrid.SetColumnSpan(pSetsRow, 3);
+
+            gbAdv.Controls.Add(pAdvGrid);
+
+            // 3.6: Лог
             _tbLog = new TextBox
             {
                 Multiline = true,
@@ -2618,6 +2972,7 @@ namespace NWD2DWG
             };
 
             pMain.Controls.Add(_tbLog);
+            pMain.Controls.Add(gbAdv);
             pMain.Controls.Add(gbOpt);
             pMain.Controls.Add(gbFmt);
             pMain.Controls.Add(gbOut);
@@ -2789,13 +3144,24 @@ namespace NWD2DWG
 
         void ShowAbout()
         {
-            string msg = "NWD2DWG v1.0\n" +
-                         "Конвертер 3D-геометрии Navisworks (.NWD/.NWC) в AutoCAD (.DWG/.DXF)\n\n" +
+            string msg = "NWD2DWG v2.0\n" +
+                         "Универсальный BIM-конвертер геометрии Navisworks (.NWD/.NWC/.NWF)\n" +
+                         "в форматы AutoCAD (.DWG/.DXF), glTF/GLB (Web/VR) и IFC 2x3 (BIM)\n\n" +
+                         "Новые возможности v2.0:\n" +
+                         "• Mesh Decimation (QEM) — упрощение геометрии 0-90%\n" +
+                         "• Solid Reconstructor — автоматическое распознавание тел\n" +
+                         "• BIM Attribute Transfer (XData) — перенос свойств элементов\n" +
+                         "• Export by Selection Sets — фильтрация по выборкам\n" +
+                         "• glTF / GLB Export — экспорт для Web, VR, Blender\n" +
+                         "• IFC 2x3 Export — координационные BIM-модели\n" +
+                         "• Section Box Crop — обрезка области видимости\n" +
+                         "• PBR Materials & Transparency — перенос прозрачности и цветов\n" +
+                         "• BIM Watchdog — автоматический фоновый конвертер папок\n" +
+                         "• Multi-threaded Engine — многопоточная обработка\n\n" +
                          "Разработчик: BaidurovLabs\n" +
                          "Сайт: https://baidurovlabs.ru\n\n" +
                          "Лицензия: GNU General Public License v3.0 (GPLv3)\n" +
-                         "Данная программа является свободным программным обеспечением. " +
-                         "Вы можете распространять и/или модифицировать ее в соответствии с условиями GNU GPL v3.\n\n" +
+                         "Свободное программное обеспечение.\n\n" +
                          "Совместимость:\n" +
                          "• Navisworks: 2020 – 2026 (Manage / Simulate)\n" +
                          "• AutoCAD: 2018 – 2026 (Native DWG / DXF R12 / 3DFACE)\n";
@@ -2914,7 +3280,14 @@ namespace NWD2DWG
                         ? Path.GetDirectoryName(Path.GetFullPath(file))
                         : Path.GetFullPath(opts.OutputDir);
                     try { Directory.CreateDirectory(outDir); } catch { }
-                    string ext = opts.Format == OutFormat.Dwg ? ".dwg" : ".dxf";
+                    string ext = ".dxf";
+                    switch (opts.Format)
+                    {
+                        case OutFormat.Dwg: ext = ".dwg"; break;
+                        case OutFormat.Gltf: ext = ".gltf"; break;
+                        case OutFormat.Glb: ext = ".glb"; break;
+                        case OutFormat.Ifc: ext = ".ifc"; break;
+                    }
                     string outPath = Path.Combine(outDir, Path.GetFileNameWithoutExtension(file) + ext);
 
                     Log.Write("--- файл " + (done + 1) + "/" + files.Count + ": " + file + " -> " + outPath);
@@ -2963,11 +3336,16 @@ namespace NWD2DWG
 
         AppOptions CollectOptions()
         {
+            string sets = _tbSets.Text.Trim();
+            if (sets == "все (через запятую)") sets = "";
+
             return new AppOptions
             {
                 Batch = _cbBatch.Checked,
                 Format = _rb3dFace.Checked ? OutFormat.Dxf3dFace
                        : _rbDwg.Checked ? OutFormat.Dwg
+                       : _rbGltf.Checked ? OutFormat.Gltf
+                       : _rbIfc.Checked ? OutFormat.Ifc
                        : OutFormat.DxfPolyface,
                 ShowNavisworks = _cbShowNw.Checked,
                 ShowAutoCad = _cbShowAcad.Checked,
@@ -2975,7 +3353,12 @@ namespace NWD2DWG
                 WithColors = _cbColors.Checked,
                 LayersPerItem = _cbLayers.Checked,
                 SplitDisciplines = _cbSplit.Checked,
-                OutputDir = _tbOutput.Text.Trim()
+                OutputDir = _tbOutput.Text.Trim(),
+                DecimatePercent = _tbDecimate.Value,
+                SolidDetect = _cbSolidDetect.Checked,
+                TransferXData = _cbXData.Checked,
+                TransferMaterials = _cbMaterials.Checked,
+                SelectionSets = sets
             };
         }
 

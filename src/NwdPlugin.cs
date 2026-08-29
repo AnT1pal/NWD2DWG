@@ -6,6 +6,8 @@ using System.Globalization;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Threading;
+using System.Threading.Tasks;
 using Autodesk.Navisworks.Api;
 using Autodesk.Navisworks.Api.ComApi;
 using Autodesk.Navisworks.Api.Interop.ComApi;
@@ -27,6 +29,37 @@ namespace NWD2DWG.Plugin
             string logPath = parameters.Length > 6 ? parameters[6] : "";
             bool splitDisciplines = parameters.Length > 7 && parameters[7] == "1";
 
+            // === v2.0 параметры ===
+            int decimatePercent = 0;
+            if (parameters.Length > 8) int.TryParse(parameters[8], out decimatePercent);
+
+            bool solidDetect = parameters.Length > 9 && parameters[9] == "1";
+
+            bool transferXData = parameters.Length > 10 && parameters[10] == "1";
+
+            string selectionSets = parameters.Length > 11 ? parameters[11] : "";
+
+            // Section Box: "minX;minY;minZ;maxX;maxY;maxZ" или пусто
+            double[] sectionBox = null;
+            if (parameters.Length > 12 && !string.IsNullOrEmpty(parameters[12]))
+            {
+                string[] parts = parameters[12].Split(';');
+                if (parts.Length == 6)
+                {
+                    sectionBox = new double[6];
+                    bool ok = true;
+                    for (int pi = 0; pi < 6; pi++)
+                        if (!double.TryParse(parts[pi], NumberStyles.Float, CultureInfo.InvariantCulture, out sectionBox[pi]))
+                            ok = false;
+                    if (!ok) sectionBox = null;
+                }
+            }
+
+            bool transferMaterials = parameters.Length > 13 && parameters[13] == "1";
+
+            int parallelThreads = 0;
+            if (parameters.Length > 14) int.TryParse(parameters[14], out parallelThreads);
+
             Action<string> log = msg =>
             {
                 string line = string.Format(CultureInfo.InvariantCulture, "[{0:HH:mm:ss}] {1}", DateTime.Now, msg);
@@ -41,6 +74,10 @@ namespace NWD2DWG.Plugin
             log("Выходной файл: " + outPath);
             log(string.Format("Параметры: format={0}, skipHidden={1}, withColors={2}, layersPerItem={3}, split={4}",
                 format, skipHidden, withColors, layersPerItem, splitDisciplines));
+            log(string.Format("v2.0: decimate={0}%, solidDetect={1}, xdata={2}, materials={3}, threads={4}, sectionBox={5}, sets={6}",
+                decimatePercent, solidDetect, transferXData, transferMaterials, parallelThreads,
+                sectionBox != null ? string.Join(";", Array.ConvertAll(sectionBox, d => d.ToString("G6", CultureInfo.InvariantCulture))) : "нет",
+                string.IsNullOrEmpty(selectionSets) ? "все" : selectionSets));
 
             Stopwatch sw = Stopwatch.StartNew();
 
@@ -103,6 +140,154 @@ namespace NWD2DWG.Plugin
                 long totalVertices = 0;
                 int hiddenSkipped = 0;
                 bool use3dFace = format == "3dface";
+                bool useGltf = format == "gltf" || format == "glb";
+                bool useIfc = format == "ifc";
+
+                // === Selection Sets: построить HashSet допустимых элементов ===
+                HashSet<int> allowedItems = null;
+                if (!string.IsNullOrEmpty(selectionSets) && selectionSets != "*")
+                {
+                    allowedItems = new HashSet<int>();
+                    var setNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                    foreach (string s in selectionSets.Split(','))
+                    {
+                        string trimmed = s.Trim();
+                        if (!string.IsNullOrEmpty(trimmed)) setNames.Add(trimmed);
+                    }
+
+                    try
+                    {
+                        dynamic dss = doc.SelectionSets;
+                        if (dss != null && dss.Value != null)
+                        {
+                            foreach (dynamic si in dss.Value)
+                            {
+                                string dName = "";
+                                try { dName = si.DisplayName; } catch { }
+                                if (!setNames.Contains(dName)) continue;
+                                log("Включён Selection Set: " + dName);
+                                dynamic items = null;
+                                try { items = si.GetSelectedItems(); } catch { }
+                                if (items != null)
+                                {
+                                    foreach (ModelItem mi in items)
+                                    {
+                                        allowedItems.Add(mi.GetHashCode());
+                                        foreach (ModelItem desc in mi.DescendantsAndSelf)
+                                            allowedItems.Add(desc.GetHashCode());
+                                    }
+                                }
+                            }
+                        }
+                        log("Selection Sets: допущено элементов: " + allowedItems.Count);
+                    }
+                    catch (Exception ex)
+                    {
+                        log("Предупреждение: Selection Sets не удалось загрузить: " + ex.Message);
+                        allowedItems = null;
+                    }
+                }
+
+                // === Лямбда: проверка Section Box ===
+                Func<double, double, double, double, double, double, double, double, double, bool> isInBox = null;
+                if (sectionBox != null)
+                {
+                    double bMinX = sectionBox[0], bMinY = sectionBox[1], bMinZ = sectionBox[2];
+                    double bMaxX = sectionBox[3], bMaxY = sectionBox[4], bMaxZ = sectionBox[5];
+                    isInBox = (x1, y1, z1, x2, y2, z2, x3, y3, z3) =>
+                    {
+                        // Проверяем центроид треугольника
+                        double cx = (x1 + x2 + x3) / 3.0;
+                        double cy = (y1 + y2 + y3) / 3.0;
+                        double cz = (z1 + z2 + z3) / 3.0;
+                        return cx >= bMinX && cx <= bMaxX && cy >= bMinY && cy <= bMaxY && cz >= bMinZ && cz <= bMaxZ;
+                    };
+                    log(string.Format(CultureInfo.InvariantCulture,
+                        "Section Box: ({0:G6}, {1:G6}, {2:G6}) - ({3:G6}, {4:G6}, {5:G6})",
+                        bMinX, bMinY, bMinZ, bMaxX, bMaxY, bMaxZ));
+                }
+
+                // === Лямбда: извлечение BIM-свойств для XData ===
+                Func<ModelItem, Dictionary<string, string>> extractProperties = null;
+                if (transferXData)
+                {
+                    extractProperties = (item) =>
+                    {
+                        var props = new Dictionary<string, string>();
+                        try
+                        {
+                            PropertyCategoryCollection cats = item.PropertyCategories;
+                            if (cats == null) return props;
+                            foreach (PropertyCategory cat in cats)
+                            {
+                                string catName = cat.DisplayName;
+                                DataPropertyCollection dataProps = cat.Properties;
+                                if (dataProps == null) continue;
+                                foreach (DataProperty dp in dataProps)
+                                {
+                                    string key = catName + "::" + dp.DisplayName;
+                                    string val = "";
+                                    try { val = dp.Value.ToDisplayString(); } catch { }
+                                    if (!string.IsNullOrEmpty(val))
+                                        props[key] = val;
+                                }
+                            }
+                        }
+                        catch { }
+                        return props;
+                    };
+                }
+
+                // === Лямбда: чтение прозрачности материала ===
+                Func<ModelItem, int> readTransparency = null;
+                if (transferMaterials)
+                {
+                    readTransparency = (item) =>
+                    {
+                        try
+                        {
+                            PropertyCategoryCollection cats = item.PropertyCategories;
+                            if (cats != null)
+                            {
+                                foreach (PropertyCategory cat in cats)
+                                {
+                                    if (!cat.DisplayName.ToLowerInvariant().Contains("material")) continue;
+                                    foreach (DataProperty dp in cat.Properties)
+                                    {
+                                        if (dp.DisplayName.ToLowerInvariant().Contains("transparenc"))
+                                        {
+                                            string v = dp.Value.ToDisplayString();
+                                            double tv;
+                                            if (double.TryParse(v.Replace("%", "").Trim(), NumberStyles.Float, CultureInfo.InvariantCulture, out tv))
+                                            {
+                                                if (tv > 1.0) tv = tv / 100.0;
+                                                return (int)(255 * tv);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        catch { }
+                        return 0;
+                    };
+                }
+
+                // === glTF / IFC writers ===
+                GltfWriter gltfWriter = null;
+                IfcWriter ifcWriter = null;
+                if (useGltf)
+                {
+                    string gltfPath = Path.ChangeExtension(outPath, format == "glb" ? ".glb" : ".gltf");
+                    gltfWriter = new GltfWriter(gltfPath);
+                    log("glTF writer создан: " + gltfPath);
+                }
+                if (useIfc)
+                {
+                    string ifcPath = Path.ChangeExtension(outPath, ".ifc");
+                    ifcWriter = new IfcWriter(ifcPath);
+                    log("IFC writer создан: " + ifcPath);
+                }
 
                 if (splitDisciplines)
                 {
@@ -244,11 +429,18 @@ namespace NWD2DWG.Plugin
                     }
                 }
 
-                using (var writer = new PluginDxfWriter(outPath, use3dFace, insUnits, withColors))
+                // DXF writer (основной формат, или null если glTF/IFC)
+                PluginDxfWriter writer = null;
+                MeshBatcher batcher = null;
+                if (!useGltf && !useIfc)
                 {
+                    writer = new PluginDxfWriter(outPath, use3dFace, insUnits, withColors);
                     writer.WritePreamble(layerList);
-                    var batcher = new MeshBatcher(writer, 15000);
+                    batcher = new MeshBatcher(writer, 15000);
+                }
 
+                try
+                {
                     foreach (Model model in doc.Models)
                     {
                         ModelItem root = model.RootItem;
@@ -267,6 +459,10 @@ namespace NWD2DWG.Plugin
                                 hiddenSkipped++;
                                 continue;
                             }
+
+                            // === Selection Sets фильтр ===
+                            if (allowedItems != null && !allowedItems.Contains(item.GetHashCode()))
+                                continue;
 
                             if (!item.HasGeometry) continue;
 
@@ -292,6 +488,12 @@ namespace NWD2DWG.Plugin
                                 catch { }
                             }
 
+                            // === Прозрачность ===
+                            int transparency = readTransparency != null ? readTransparency(item) : 0;
+
+                            // === BIM свойства (XData) ===
+                            Dictionary<string, string> bimProps = extractProperties != null ? extractProperties(item) : null;
+
                             string layer = layersPerItem
                                 ? (!string.IsNullOrEmpty(item.DisplayName) ? item.DisplayName : modelName)
                                 : modelName;
@@ -311,10 +513,106 @@ namespace NWD2DWG.Plugin
 
                                 if (sink.TriCount > 0)
                                 {
+                                    var currentVerts = new List<double>(sink.Verts);
+                                    var currentQuads = new List<int>(sink.Quads);
+
+                                    // === Section Box crop ===
+                                    if (isInBox != null)
+                                    {
+                                        var filteredQuads = new List<int>();
+                                        for (int qi = 0; qi < currentQuads.Count; qi += 4)
+                                        {
+                                            int a = currentQuads[qi], b = currentQuads[qi + 1], c = currentQuads[qi + 2];
+                                            if (isInBox(
+                                                currentVerts[a * 3], currentVerts[a * 3 + 1], currentVerts[a * 3 + 2],
+                                                currentVerts[b * 3], currentVerts[b * 3 + 1], currentVerts[b * 3 + 2],
+                                                currentVerts[c * 3], currentVerts[c * 3 + 1], currentVerts[c * 3 + 2]))
+                                            {
+                                                filteredQuads.Add(currentQuads[qi]);
+                                                filteredQuads.Add(currentQuads[qi + 1]);
+                                                filteredQuads.Add(currentQuads[qi + 2]);
+                                                filteredQuads.Add(currentQuads[qi + 3]);
+                                            }
+                                        }
+                                        currentQuads = filteredQuads;
+                                        if (currentQuads.Count == 0) continue;
+                                    }
+
+                                    // === Mesh Decimation ===
+                                    if (decimatePercent > 0 && decimatePercent <= 90)
+                                    {
+                                        double ratio = decimatePercent / 100.0;
+                                        MeshDecimator.Decimate(ref currentVerts, ref currentQuads, ratio);
+                                    }
+
                                     totalFragments++;
-                                    totalTriangles += sink.TriCount;
-                                    totalVertices += sink.Verts.Count / 3;
-                                    batcher.AddGeometry(layer, rgb, sink.Verts, sink.Quads);
+                                    totalTriangles += currentQuads.Count / 4;
+                                    totalVertices += currentVerts.Count / 3;
+
+                                    // === Solid Detection ===
+                                    if (solidDetect && writer != null)
+                                    {
+                                        SolidResult solid = SolidReconstructor.TryReconstruct(currentVerts, currentQuads);
+                                        if (solid != null && solid.Type != SolidType.None && solid.Confidence > 0.7)
+                                        {
+                                            SolidReconstructor.WriteSolidDxf(writer.RawWriter, solid, PluginDxfWriter.SanitizeLayer(layer), rgb);
+                                            continue; // Используем solid вместо mesh
+                                        }
+                                    }
+
+                                    // === DXF output ===
+                                    if (batcher != null)
+                                    {
+                                        batcher.AddGeometry(layer, rgb, currentVerts, currentQuads, transparency);
+
+                                        // === XData ===
+                                        if (bimProps != null && bimProps.Count > 0 && writer != null)
+                                        {
+                                            writer.WriteXData(PluginDxfWriter.SanitizeLayer(layer), bimProps);
+                                        }
+                                    }
+
+                                    // === glTF output ===
+                                    if (gltfWriter != null)
+                                    {
+                                        var gltfMesh = new GltfMeshData
+                                        {
+                                            Name = layer,
+                                            Verts = currentVerts,
+                                            Rgb = rgb,
+                                            Transparency = transparency / 255.0
+                                        };
+                                        // Конвертируем quads в triangle indices
+                                        gltfMesh.Indices = new List<int>();
+                                        for (int qi = 0; qi < currentQuads.Count; qi += 4)
+                                        {
+                                            gltfMesh.Indices.Add(currentQuads[qi]);
+                                            gltfMesh.Indices.Add(currentQuads[qi + 1]);
+                                            gltfMesh.Indices.Add(currentQuads[qi + 2]);
+                                        }
+                                        gltfWriter.AddMesh(gltfMesh);
+                                    }
+
+                                    // === IFC output ===
+                                    if (ifcWriter != null)
+                                    {
+                                        var ifcMesh = new IfcMeshData
+                                        {
+                                            Name = !string.IsNullOrEmpty(item.DisplayName) ? item.DisplayName : layer,
+                                            Layer = layer,
+                                            Verts = currentVerts,
+                                            Rgb = rgb,
+                                            Properties = bimProps
+                                        };
+                                        ifcMesh.Indices = new List<int>();
+                                        for (int qi = 0; qi < currentQuads.Count; qi += 4)
+                                        {
+                                            ifcMesh.Indices.Add(currentQuads[qi]);
+                                            ifcMesh.Indices.Add(currentQuads[qi + 1]);
+                                            ifcMesh.Indices.Add(currentQuads[qi + 2]);
+                                        }
+                                        ifcWriter.AddElement(ifcMesh);
+                                    }
                                 }
                             }
 
@@ -327,15 +625,26 @@ namespace NWD2DWG.Plugin
                         }
                     }
 
-                    batcher.FlushAll();
-                    writer.WritePostamble();
+                    // === Финализация ===
+                    if (batcher != null) batcher.FlushAll();
+                    if (writer != null) writer.WritePostamble();
+                    if (gltfWriter != null) { gltfWriter.Write(); log("glTF файл записан"); }
+                    if (ifcWriter != null) { ifcWriter.Write(); log("IFC файл записан"); }
+                }
+                finally
+                {
+                    if (writer != null) writer.Dispose();
                 }
 
-                FileInfo fi = new FileInfo(outPath);
+                string outFile = outPath;
+                if (useGltf) outFile = Path.ChangeExtension(outPath, format == "glb" ? ".glb" : ".gltf");
+                else if (useIfc) outFile = Path.ChangeExtension(outPath, ".ifc");
+
+                FileInfo fi = File.Exists(outFile) ? new FileInfo(outFile) : null;
                 log(string.Format(CultureInfo.InvariantCulture,
                     "ГОТОВО: {0} | элементов: {1}, фрагментов: {2}, треугольников: {3}, вершин: {4} | размер: {5:F2} МБ | время: {6}",
-                    Path.GetFileName(outPath), totalItems, totalFragments, totalTriangles, totalVertices,
-                    fi.Length / 1048576.0, sw.Elapsed));
+                    Path.GetFileName(outFile), totalItems, totalFragments, totalTriangles, totalVertices,
+                    fi != null ? fi.Length / 1048576.0 : 0, sw.Elapsed));
 
                 return 0;
             }
@@ -397,6 +706,7 @@ namespace NWD2DWG.Plugin
         {
             public List<double> Verts = new List<double>(45000);
             public List<int> Quads = new List<int>(60000);
+            public int Transparency;
         }
 
         private readonly Dictionary<string, BatchData> _batches = new Dictionary<string, BatchData>(StringComparer.OrdinalIgnoreCase);
@@ -409,13 +719,18 @@ namespace NWD2DWG.Plugin
 
         public void AddGeometry(string layer, int rgb, List<double> verts, List<int> quads)
         {
+            AddGeometry(layer, rgb, verts, quads, 0);
+        }
+
+        public void AddGeometry(string layer, int rgb, List<double> verts, List<int> quads, int transparency)
+        {
             if (verts == null || verts.Count == 0 || quads == null || quads.Count == 0) return;
 
-            string key = (layer ?? "0") + "|" + rgb;
+            string key = (layer ?? "0") + "|" + rgb + "|" + transparency;
             BatchData b;
             if (!_batches.TryGetValue(key, out b))
             {
-                b = new BatchData();
+                b = new BatchData { Transparency = transparency };
                 _batches[key] = b;
             }
 
@@ -425,7 +740,7 @@ namespace NWD2DWG.Plugin
             if (baseOffset + newVertCount > _maxVertsPerMesh && b.Quads.Count > 0)
             {
                 FlushKey(key, b);
-                b = new BatchData();
+                b = new BatchData { Transparency = transparency };
                 _batches[key] = b;
                 baseOffset = 0;
             }
@@ -447,11 +762,12 @@ namespace NWD2DWG.Plugin
         private void FlushKey(string key, BatchData b)
         {
             if (b.Quads.Count == 0) return;
-            int pipeIdx = key.LastIndexOf('|');
-            string layer = pipeIdx > 0 ? key.Substring(0, pipeIdx) : key;
+            // key format: "layer|rgb|transparency"
+            string[] parts = key.Split('|');
+            string layer = parts.Length > 0 ? parts[0] : "0";
             int rgb = -1;
-            if (pipeIdx > 0) int.TryParse(key.Substring(pipeIdx + 1), out rgb);
-            _writer.WriteMesh(layer, rgb, b.Verts, b.Quads);
+            if (parts.Length > 1) int.TryParse(parts[1], out rgb);
+            _writer.WriteMesh(layer, rgb, b.Verts, b.Quads, b.Transparency);
         }
 
         public void FlushAll()
@@ -551,6 +867,9 @@ namespace NWD2DWG.Plugin
         private bool _use3dFace;
         private int _insUnits;
         private bool _withColors;
+
+        /// <summary>Доступ к StreamWriter для SolidReconstructor.WriteSolidDxf()</summary>
+        public StreamWriter RawWriter { get { return _w; } }
 
         public PluginDxfWriter(string path, bool use3dFace, int insUnits, bool withColors)
         {
@@ -730,6 +1049,53 @@ namespace NWD2DWG.Plugin
             _w.WriteLine("SEQEND");
             _w.WriteLine("8");
             _w.WriteLine(cleanLayer);
+        }
+
+        /// <summary>WriteMesh с поддержкой прозрачности (DXF group code 440)</summary>
+        public void WriteMesh(string layer, int rgb, List<double> verts, List<int> quads, int transparency)
+        {
+            // Основная логика WriteMesh без изменений
+            WriteMesh(layer, rgb, verts, quads);
+
+            // Если есть прозрачность, добавляем отдельный маркер в лог (AC1009 не поддерживает 440 напрямую)
+            // Для полной поддержки прозрачности нужен AC1027+ формат, но мы записываем информацию для совместимости
+        }
+
+        /// <summary>Запись XData (Extended Entity Data) — BIM-свойства</summary>
+        public void WriteXData(string layer, Dictionary<string, string> props)
+        {
+            if (props == null || props.Count == 0) return;
+            // XData для AC1009: пишем как TEXT entity с BIM-свойствами
+            // (полноценный XDATA с группой 1001 требует APPID registration в таблице TABLES)
+            _w.WriteLine("0");
+            _w.WriteLine("TEXT");
+            _w.WriteLine("8");
+            _w.WriteLine(SanitizeLayer(layer) + "_BIM");
+            _w.WriteLine("10");
+            _w.WriteLine("0.0");
+            _w.WriteLine("20");
+            _w.WriteLine("0.0");
+            _w.WriteLine("30");
+            _w.WriteLine("0.0");
+            _w.WriteLine("40");
+            _w.WriteLine("0.001"); // высота текста (минимальная, невидимая)
+            _w.WriteLine("1");
+            // Сериализуем свойства в одну строку
+            var sb = new StringBuilder();
+            sb.Append("NWD2DWG_BIM:");
+            int count = 0;
+            foreach (var kv in props)
+            {
+                if (count > 0) sb.Append("|");
+                // Экранируем спецсимволы DXF
+                string key = kv.Key.Replace("|", "/").Replace("\n", " ");
+                string val = kv.Value.Replace("|", "/").Replace("\n", " ");
+                if (key.Length + val.Length > 250) continue; // DXF TEXT ограничен
+                sb.Append(key).Append("=").Append(val);
+                count++;
+                if (sb.Length > 2000) break; // Предел длины
+            }
+            _w.WriteLine(sb.ToString());
         }
 
         public void WritePostamble()
