@@ -3492,7 +3492,7 @@ namespace NWD2DWG
             };
             var lbSub = new System.Windows.Forms.Label
             {
-                Text = "Свободное ПО с открытым исходным кодом. Автор: Baidurov Pavel (BaidurovLabs)",
+                Text = "Свободное ПО с открытым исходным кодом. Автор: Baidurov Pavel",
                 Location = new Point(0, 28),
                 ForeColor = ColTextMuted,
                 AutoSize = true
@@ -3528,7 +3528,7 @@ namespace NWD2DWG
             if (string.IsNullOrEmpty(tbLic.Text))
             {
                 tbLic.Text = "GNU GENERAL PUBLIC LICENSE\r\nVersion 3, 29 June 2007\r\n\r\n" +
-                             "Copyright (C) 2026 Baidurov Pavel / BaidurovLabs (https://baidurovlabs.ru)\r\n\r\n" +
+                             "Copyright (C) 2026 Baidurov Pavel (https://github.com/AnT1pal/NWD2DWG)\r\n\r\n" +
                              "Everyone is permitted to copy and distribute verbatim copies\r\nof this license document, but changing it is not allowed.\r\n\r\n" +
                              "Preamble\r\n\r\n" +
                              "The GNU General Public License is a free, copyleft license for\r\nsoftware and other kinds of works.\r\n\r\n" +
@@ -3590,9 +3590,9 @@ namespace NWD2DWG
         {
             var dlg = new Form
             {
-                Text = "О программе NWD2DWG v3.0",
-                Width = 840,
-                Height = 640,
+                Text = "О программе NWD2DWG",
+                Width = 720,
+                Height = 380,
                 StartPosition = FormStartPosition.CenterScreen,
                 BackColor = ColBg,
                 ForeColor = ColText,
@@ -3611,14 +3611,14 @@ namespace NWD2DWG
                 Padding = new Padding(16, 12, 16, 12)
             };
             pRoot.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-            pRoot.RowStyles.Add(new RowStyle(SizeType.Absolute, 55));
+            pRoot.RowStyles.Add(new RowStyle(SizeType.Absolute, 50));
             pRoot.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-            pRoot.RowStyles.Add(new RowStyle(SizeType.Absolute, 46));
+            pRoot.RowStyles.Add(new RowStyle(SizeType.Absolute, 44));
 
             var pTop = new Panel { Dock = DockStyle.Fill, Margin = new Padding(0) };
             var lbHead = new System.Windows.Forms.Label
             {
-                Text = "NWD2DWG v3.0 | BIM-конвертер Navisworks",
+                Text = "NWD2DWG v3.0",
                 Font = new Font("Segoe UI", 12f, FontStyle.Bold),
                 ForeColor = ColAccent,
                 Location = new Point(0, 2),
@@ -3626,8 +3626,8 @@ namespace NWD2DWG
             };
             var lbSub = new System.Windows.Forms.Label
             {
-                Text = "Разработчик: Baidurov Pavel (BaidurovLabs) | Лицензия: GNU General Public License v3.0",
-                Location = new Point(0, 28),
+                Text = "BIM-конвертер моделей Autodesk Navisworks в AutoCAD DWG/DXF, glTF и IFC",
+                Location = new Point(0, 26),
                 ForeColor = ColTextMuted,
                 AutoSize = true
             };
@@ -3646,7 +3646,7 @@ namespace NWD2DWG
                 Dock = DockStyle.Fill,
                 Multiline = true,
                 ReadOnly = true,
-                ScrollBars = ScrollBars.Vertical,
+                ScrollBars = ScrollBars.None,
                 Font = new Font("Segoe UI", 9.5f),
                 BackColor = ColInput,
                 ForeColor = Color.FromArgb(220, 227, 235),
@@ -3654,53 +3654,28 @@ namespace NWD2DWG
                 TabStop = false
             };
 
-            tbAbout.Text = "NWD2DWG — универсальный высокопроизводительный BIM-конвертер геометрии Navisworks (.NWD, .NWC, .NWF) в форматы AutoCAD (.DWG, .DXF), glTF/GLB (Web/VR) и IFC 2x3 (BIM-координация).\r\n\r\n" +
-                           "► Инженерные возможности v3.0:\r\n" +
-                           " • Сдвиг к нулю (0,0,0) + .wld — устранение графического дребезга на гигантских геодезических координатах\r\n" +
-                           " • Оси и уровни (_GRIDS) — автоматическое извлечение координационных сеток и высотных отметок здания\r\n" +
-                           " • Оси труб (DN/L) — скелетизация трубопроводных сетей с сохранением диаметров и длин участков\r\n" +
-                           " • Смета ВОР в Excel/CSV — расчёт объёмов работ, площадей сеток и длин материалов по категориям\r\n" +
-                           " • Коллизии BCF 2.1 — экспорт проверок Clash Detective в открытый стандарт BCF Zip с привязкой точек\r\n" +
-                           " • 3D BIM Diff — геометрическое сравнение двух версий моделей с подсветкой новых, удалённых и изменённых тел\r\n" +
-                           " • Пространственный тайлинг — нарезка площадок на сектора для лёгкой работы в AutoCAD через XREF\r\n" +
-                           " • Анонимизация свойств — удаление коммерческих атрибутов и персональных данных перед передачей модели\r\n" +
-                           " • TempCleaner — автоматическая и ручная очистка промежуточного кэша\r\n\r\n" +
-                           "► Базовое ядро v2.0:\r\n" +
-                           " • QEM Mesh Decimation — адаптивное сжатие полигональных сеток на 0-90% без искажения геометрии\r\n" +
-                           " • Solid Reconstructor — PCA-распознавание примитивов и тел (цилиндры, трубы, балки, коробки)\r\n" +
-                           " • BIM Attribute Transfer — перенос всех вкладок свойств элементов Navisworks в AutoCAD XData\r\n" +
-                           " • glTF 2.0 / GLB и IFC 2x3 — прямой экспорт в открытые 3D и BIM форматы с материалами и PBR\r\n" +
-                           " • BIM Watchdog — автоматическая фоновая служба мониторинга и пакетной конвертации директорий\r\n\r\n" +
-                           "Совместимость: Autodesk Navisworks 2020-2026, AutoCAD 2018-2026, NanoCAD, Blender, Unity.";
+            tbAbout.Text = "Программа предназначена для прямого извлечения и конвертации 3D-геометрии,\r\n" +
+                           "координационных сеток, уровней и метаданных из файлов Navisworks (.NWD, .NWC, .NWF)\r\n" +
+                           "в форматы AutoCAD (.DWG, .DXF), glTF 2.0 / GLB и IFC 2x3.\r\n\r\n" +
+                           "Версия: 3.0 (Engineering & BIM Edition)\r\n" +
+                           "Лицензия: GNU General Public License v3.0 (GPLv3)\r\n" +
+                           "Автор: Baidurov Pavel\r\n" +
+                           "Совместимость: Autodesk Navisworks 2020–2026, AutoCAD 2018–2026";
             pBorder.Controls.Add(tbAbout);
 
             var pBot = new TableLayoutPanel
             {
                 Dock = DockStyle.Fill,
-                ColumnCount = 3,
+                ColumnCount = 2,
                 RowCount = 1,
                 Margin = new Padding(0, 6, 0, 0)
             };
-            pBot.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
             pBot.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-            pBot.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 130));
-
-            var lnkSite = new LinkLabel
-            {
-                Text = "baidurovlabs.ru",
-                LinkColor = Color.FromArgb(88, 166, 255),
-                ActiveLinkColor = Color.FromArgb(165, 214, 255),
-                VisitedLinkColor = Color.FromArgb(88, 166, 255),
-                Font = new Font("Segoe UI", 9.5f, FontStyle.Bold),
-                AutoSize = true,
-                Anchor = AnchorStyles.Left,
-                Margin = new Padding(0, 6, 20, 0)
-            };
-            lnkSite.LinkClicked += (s, e) => { try { Process.Start(new ProcessStartInfo("https://baidurovlabs.ru") { UseShellExecute = true }); } catch { } };
+            pBot.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 120));
 
             var lnkGit = new LinkLabel
             {
-                Text = "GitHub: github.com/AnT1pal/NWD2DWG",
+                Text = "GitHub: https://github.com/AnT1pal/NWD2DWG",
                 LinkColor = Color.FromArgb(88, 166, 255),
                 ActiveLinkColor = Color.FromArgb(165, 214, 255),
                 VisitedLinkColor = Color.FromArgb(88, 166, 255),
@@ -3714,9 +3689,8 @@ namespace NWD2DWG
             var btnClose = StyleButton(new Button { Text = "Закрыть", Width = 110, Height = 34, DialogResult = DialogResult.OK, TabStop = true }, true);
             btnClose.Anchor = AnchorStyles.Right;
 
-            pBot.Controls.Add(lnkSite, 0, 0);
-            pBot.Controls.Add(lnkGit, 1, 0);
-            pBot.Controls.Add(btnClose, 2, 0);
+            pBot.Controls.Add(lnkGit, 0, 0);
+            pBot.Controls.Add(btnClose, 1, 0);
 
             pRoot.Controls.Add(pTop, 0, 0);
             pRoot.Controls.Add(pBorder, 0, 1);
