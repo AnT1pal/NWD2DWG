@@ -1292,15 +1292,20 @@ namespace NWD2DWG
                 // Если формат DWG — конвертируем через AutoCAD
                 if (isDwg)
                 {
+                    string finalDestDir = Path.GetDirectoryName(Path.GetFullPath(outPath)) ?? ".";
+                    string finalBaseName = Path.GetFileNameWithoutExtension(outPath);
+
                     if (opts.SplitDisciplines)
                     {
-                        string outDir = Path.GetDirectoryName(targetDxf) ?? ".";
-                        string baseName = Path.GetFileNameWithoutExtension(targetDxf);
-                        foreach (string splitDxf in Directory.GetFiles(outDir, baseName + "_*.dxf"))
+                        string tempOutDir = Path.GetDirectoryName(targetDxf) ?? ".";
+                        string tempBaseName = Path.GetFileNameWithoutExtension(targetDxf);
+                        foreach (string splitDxf in Directory.GetFiles(tempOutDir, tempBaseName + "_*.dxf"))
                         {
-                            string splitDwg = Path.ChangeExtension(splitDxf, ".dwg");
+                            string sectionSuffix = Path.GetFileName(splitDxf).Substring(tempBaseName.Length);
+                            string finalSplitDwg = Path.Combine(finalDestDir, finalBaseName + Path.ChangeExtension(sectionSuffix, ".dwg"));
                             if (status != null) status("Конвертация " + Path.GetFileName(splitDxf) + " -> DWG...");
-                            AcadWriter.ConvertDxfToDwg(splitDxf, splitDwg, opts.ShowAutoCad);
+                            Log.Write("конвертация раздела DXF -> DWG: " + finalSplitDwg);
+                            AcadWriter.ConvertDxfToDwg(splitDxf, finalSplitDwg, opts.ShowAutoCad);
                             try { File.Delete(splitDxf); } catch { }
                         }
                     }
