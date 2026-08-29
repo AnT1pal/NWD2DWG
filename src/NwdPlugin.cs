@@ -60,6 +60,14 @@ namespace NWD2DWG.Plugin
             int parallelThreads = 0;
             if (parameters.Length > 14) int.TryParse(parameters[14], out parallelThreads);
 
+            // === v3.0 параметры ===
+            bool geoShift = parameters.Length > 15 && parameters[15] == "1";
+            bool exportGrids = parameters.Length > 16 && parameters[16] == "1";
+            bool tracePipes = parameters.Length > 17 && parameters[17] == "1";
+            bool exportBoq = parameters.Length > 18 && parameters[18] == "1";
+            bool exportBcf = parameters.Length > 19 && parameters[19] == "1";
+            bool anonymize = parameters.Length > 20 && parameters[20] == "1";
+
             Action<string> log = msg =>
             {
                 string line = string.Format(CultureInfo.InvariantCulture, "[{0:HH:mm:ss}] {1}", DateTime.Now, msg);
@@ -78,6 +86,8 @@ namespace NWD2DWG.Plugin
                 decimatePercent, solidDetect, transferXData, transferMaterials, parallelThreads,
                 sectionBox != null ? string.Join(";", Array.ConvertAll(sectionBox, d => d.ToString("G6", CultureInfo.InvariantCulture))) : "нет",
                 string.IsNullOrEmpty(selectionSets) ? "все" : selectionSets));
+            log(string.Format("v3.0: geoShift={0}, grids={1}, tracePipes={2}, boq={3}, bcf={4}, anonymize={5}",
+                geoShift, exportGrids, tracePipes, exportBoq, exportBcf, anonymize));
 
             Stopwatch sw = Stopwatch.StartNew();
 

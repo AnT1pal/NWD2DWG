@@ -64,6 +64,15 @@ namespace NWD2DWG
         public int ParallelThreads = 0;        // 0 = auto, 1 = single
         public string WatchFolder = "";        // папка для Watchdog
         public int WatchInterval = 5;          // интервал опроса (сек)
+
+        // === v3.0 ===
+        public bool GeoShift = true;           // сдвиг к (0,0,0) + файл привязки .wld
+        public bool ExportGrids = true;        // экспорт осей и уровней (_GRIDS / _LEVELS)
+        public bool TracePipes = false;        // трассировка осевых линий трубопроводов
+        public bool ExportBoq = false;         // расчет сметы ВОР в Excel/CSV
+        public bool ExportBcf = false;         // экспорт коллизий в BCF 2.1 (.bcfzip)
+        public bool Anonymize = false;         // очистка конфиденциальных атрибутов
+        public double TileSize = 0.0;          // 0 = нет нарезки, иначе размер куба (мм)
     }
 
     // ------------------------------------------------------------------------
@@ -1269,7 +1278,14 @@ namespace NWD2DWG
                     opts.SelectionSets ?? "",                                      // [11]
                     sectionBoxStr,                                                 // [12]
                     opts.TransferMaterials ? "1" : "0",                            // [13]
-                    opts.ParallelThreads.ToString(CultureInfo.InvariantCulture)    // [14]
+                    opts.ParallelThreads.ToString(CultureInfo.InvariantCulture),   // [14]
+                    // v3.0 параметры
+                    opts.GeoShift ? "1" : "0",                                     // [15]
+                    opts.ExportGrids ? "1" : "0",                                  // [16]
+                    opts.TracePipes ? "1" : "0",                                   // [17]
+                    opts.ExportBoq ? "1" : "0",                                    // [18]
+                    opts.ExportBcf ? "1" : "0",                                    // [19]
+                    opts.Anonymize ? "1" : "0"                                     // [20]
                 };
 
                 if (status != null) status("Извлечение геометрии и полигонов...");
@@ -2392,16 +2408,34 @@ namespace NWD2DWG
                     var form = new MainForm();
                     form.StartPosition = FormStartPosition.Manual;
                     form.Location = new Point(50, 50);
-                    form.Size = new Size(1020, 940);
+                    form.Size = new Size(1180, 1040);
                     form.Show();
-                    for (int s = 0; s < 10; s++) { Application.DoEvents(); Thread.Sleep(50); }
+                    form.Refresh();
+                    for (int s = 0; s < 10; s++) { Application.DoEvents(); Thread.Sleep(40); }
                     using (var bmp = new Bitmap(form.Width, form.Height))
                     {
                         form.DrawToBitmap(bmp, new Rectangle(0, 0, form.Width, form.Height));
                         bmp.Save(shotPath, System.Drawing.Imaging.ImageFormat.Png);
                     }
-                    form.Close();
-                    File.WriteAllText(shotPath + ".txt", "Saved " + shotPath + " at " + DateTime.Now);
+                    var sb = new StringBuilder();
+                    sb.AppendLine("Form Size=" + form.Size + " ClientSize=" + form.ClientSize);
+                    foreach (Control c in form.Controls)
+                    {
+                        sb.AppendLine(string.Format("Control: Type={0}, Dock={1}, Bounds={2}, Visible={3}", c.GetType().Name, c.Dock, c.Bounds, c.Visible));
+                        foreach (Control cc in c.Controls)
+                        {
+                            sb.AppendLine(string.Format("  SubControl: Type={0}, Dock={1}, Bounds={2}, Visible={3}", cc.GetType().Name, cc.Dock, cc.Bounds, cc.Visible));
+                            foreach (Control ccc in cc.Controls)
+                            {
+                                sb.AppendLine(string.Format("    SubSubControl: Type={0}, Text={1}, Dock={2}, Bounds={3}, Visible={4}", ccc.GetType().Name, ccc.Text, ccc.Dock, ccc.Bounds, ccc.Visible));
+                                foreach (Control cccc in ccc.Controls)
+                                {
+                                    sb.AppendLine(string.Format("      Btn: Text={0}, Bounds={1}, Visible={2}", cccc.Text, cccc.Bounds, cccc.Visible));
+                                }
+                            }
+                        }
+                    }
+                    File.WriteAllText(shotPath + ".txt", sb.ToString());
                 }
                 catch (Exception ex)
                 {
@@ -2790,6 +2824,14 @@ namespace NWD2DWG
         CheckBox _cbXData;
         CheckBox _cbMaterials;
         TextBox _tbSets;
+        // v3.0 контролы
+        CheckBox _cbGeoShift;
+        CheckBox _cbGrids;
+        CheckBox _cbPipeTrace;
+        CheckBox _cbBoq;
+        CheckBox _cbBcf;
+        CheckBox _cbAnonymize;
+        Button _btnCleanTemp;
         Button _btnConvert;
         Button _btnCancel;
         Button _btnDiag;
@@ -2814,9 +2856,9 @@ namespace NWD2DWG
 
         public MainForm()
         {
-            Text = "NWD2DWG v2.0 — BaidurovLabs (GNU GPL v3)";
-            Width = 1020; Height = 940;
-            MinimumSize = new Size(960, 860);
+            Text = "NWD2DWG v3.0 — BaidurovLabs (GNU GPL v3)";
+            Width = 1180; Height = 1040;
+            MinimumSize = new Size(1080, 940);
             StartPosition = FormStartPosition.CenterScreen;
             BackColor = ColBg;
             ForeColor = ColText;
@@ -2870,7 +2912,7 @@ namespace NWD2DWG
 
             var lbTitle = new System.Windows.Forms.Label
             {
-                Text = "NWD2DWG v2.0  |  BIM-конвертер Navisworks",
+                Text = "NWD2DWG v3.0  |  BIM-конвертер Navisworks",
                 Font = new Font("Segoe UI", 11f, FontStyle.Bold),
                 ForeColor = ColAccent,
                 Dock = DockStyle.Fill,
@@ -2879,15 +2921,15 @@ namespace NWD2DWG
 
             pHeader.Controls.Add(lbTitle);
             pHeader.Controls.Add(pBrand);
-            Controls.Add(pHeader);
 
-            // 2. НИЖНЯЯ ПАНЕЛЬ ДЕЙСТВИЙ (Dock = Bottom, Height = 64)
+            // 2. НИЖНЯЯ ПАНЕЛЬ ДЕЙСТВИЙ (Dock = Bottom, Height = 56)
             var pBottom = new Panel
             {
                 Dock = DockStyle.Bottom,
-                Height = 64,
+                Height = 56,
+                MinimumSize = new Size(0, 56),
                 BackColor = ColBg,
-                Padding = new Padding(14, 4, 14, 8)
+                Padding = new Padding(0, 4, 0, 6)
             };
 
             _pb = new ProgressBar
@@ -2897,17 +2939,6 @@ namespace NWD2DWG
                 Maximum = 1000,
                 Margin = new Padding(0, 0, 0, 4)
             };
-
-            var pActionTable = new TableLayoutPanel
-            {
-                Dock = DockStyle.Fill,
-                ColumnCount = 2,
-                RowCount = 1,
-                Padding = new Padding(0, 4, 0, 0)
-            };
-            pActionTable.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-            pActionTable.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-            pActionTable.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
 
             _lbStatus = new System.Windows.Forms.Label
             {
@@ -2920,24 +2951,32 @@ namespace NWD2DWG
 
             var pButtons = new FlowLayoutPanel
             {
-                Dock = DockStyle.Fill,
-                AutoSize = true,
-                AutoSizeMode = AutoSizeMode.GrowAndShrink,
+                Dock = DockStyle.Right,
+                Width = 880,
+                Height = 40,
                 FlowDirection = FlowDirection.LeftToRight,
                 WrapContents = false,
                 Margin = new Padding(0)
             };
 
-            _btnConvert = StyleButton(new Button { Text = "▶  Конвертировать", Width = 205, Height = 36, Font = new Font("Segoe UI", 9.5f, FontStyle.Bold) }, true);
+            _btnConvert = StyleButton(new Button { Text = "▶  Конвертировать", Width = 210, Height = 36, Font = new Font("Segoe UI", 9.5f, FontStyle.Bold) }, true);
             _btnConvert.Click += (s, e) => StartConvert();
 
-            _btnCancel = StyleButton(new Button { Text = "Отмена", Width = 90, Height = 36, Enabled = false }, false);
+            _btnCancel = StyleButton(new Button { Text = "Отмена", Width = 85, Height = 36, Enabled = false }, false);
             _btnCancel.Click += (s, e) => { _cancel = true; _btnCancel.Enabled = false; _lbStatus.Text = "Отмена…"; };
 
-            _btnDiag = StyleButton(new Button { Text = "Диагностика", Width = 130, Height = 36 }, false);
+            _btnDiag = StyleButton(new Button { Text = "Диагностика", Width = 125, Height = 36 }, false);
             _btnDiag.Click += (s, e) => RunDiag();
 
-            _btnLogs = StyleButton(new Button { Text = "Логи", Width = 85, Height = 36 }, false);
+            _btnCleanTemp = StyleButton(new Button { Text = "Очистить Temp", Width = 150, Height = 36 }, false);
+            _btnCleanTemp.Click += (s, e) =>
+            {
+                long freed = NavisConverter.TempCleaner.CleanTempFiles(0);
+                MessageBox.Show(this, string.Format("Очищено {0:F1} МБ во временной папке (%TEMP%\\NWD2DWG).", freed / 1048576.0),
+                    "NWD2DWG TempCleaner", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            };
+
+            _btnLogs = StyleButton(new Button { Text = "Логи", Width = 75, Height = 36 }, false);
             _btnLogs.Click += (s, e) => OpenLogs();
 
             _btnAbout = StyleButton(new Button { Text = "О программе", Width = 145, Height = 36 }, false);
@@ -2946,15 +2985,18 @@ namespace NWD2DWG
             pButtons.Controls.Add(_btnConvert);
             pButtons.Controls.Add(_btnCancel);
             pButtons.Controls.Add(_btnDiag);
+            pButtons.Controls.Add(_btnCleanTemp);
             pButtons.Controls.Add(_btnLogs);
             pButtons.Controls.Add(_btnAbout);
 
-            pActionTable.Controls.Add(_lbStatus, 0, 0);
-            pActionTable.Controls.Add(pButtons, 1, 0);
+            var pActionRow = new Panel { Dock = DockStyle.Fill, Padding = new Padding(0, 4, 0, 0) };
+            pActionRow.Controls.Add(pButtons);
+            pActionRow.Controls.Add(_lbStatus);
+            _lbStatus.BringToFront();
 
-            pBottom.Controls.Add(pActionTable);
             pBottom.Controls.Add(_pb);
-            Controls.Add(pBottom);
+            pBottom.Controls.Add(pActionRow);
+            pActionRow.BringToFront();
 
             // 3. ОСНОВНАЯ ОБЛАСТЬ (Dock = Fill)
             var pMain = new Panel
@@ -2963,8 +3005,30 @@ namespace NWD2DWG
                 BackColor = ColBg,
                 Padding = new Padding(14, 0, 14, 0)
             };
-            Controls.Add(pMain);
-            pMain.BringToFront();
+
+            var pRoot = new TableLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                ColumnCount = 1,
+                RowCount = 3,
+                BackColor = ColBg,
+                Margin = new Padding(0),
+                Padding = new Padding(0)
+            };
+            pRoot.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            pRoot.RowStyles.Add(new RowStyle(SizeType.Absolute, 44));
+            pRoot.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+            pRoot.RowStyles.Add(new RowStyle(SizeType.Absolute, 56));
+
+            pHeader.Dock = DockStyle.Fill;
+            pMain.Dock = DockStyle.Fill;
+            pBottom.Dock = DockStyle.Fill;
+
+            pRoot.Controls.Add(pHeader, 0, 0);
+            pRoot.Controls.Add(pMain, 0, 1);
+            pRoot.Controls.Add(pBottom, 0, 2);
+
+            Controls.Add(pRoot);
 
             // 3.1: Исходный файл
             var gbIn = new DarkPanelGroup
@@ -3199,7 +3263,44 @@ namespace NWD2DWG
 
             gbAdv.Controls.Add(pAdvGrid);
 
-            // 3.6: Лог
+            // 3.6: Инженерия & BIM v3.0
+            var gbV3 = new DarkPanelGroup
+            {
+                Title = " Инженерия & BIM v3.0 ",
+                Height = 98,
+                Dock = DockStyle.Top,
+                Margin = new Padding(0, 0, 0, 6)
+            };
+
+            var pV3Grid = new TableLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                ColumnCount = 3,
+                RowCount = 2,
+                Padding = new Padding(4, 2, 4, 0)
+            };
+            pV3Grid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 36));
+            pV3Grid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 32));
+            pV3Grid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 32));
+            pV3Grid.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));
+            pV3Grid.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));
+
+            _cbGeoShift = StyleCheckBox(new CheckBox { Text = "Сдвиг к нулю (0,0,0) + .wld", Checked = true, Dock = DockStyle.Fill });
+            _cbGrids = StyleCheckBox(new CheckBox { Text = "Оси и уровни (_GRIDS)", Checked = true, Dock = DockStyle.Fill });
+            _cbPipeTrace = StyleCheckBox(new CheckBox { Text = "Оси труб (DN/L)", Checked = false, Dock = DockStyle.Fill });
+            _cbBoq = StyleCheckBox(new CheckBox { Text = "Смета ВОР в Excel/CSV", Checked = false, Dock = DockStyle.Fill });
+            _cbBcf = StyleCheckBox(new CheckBox { Text = "Коллизии BCF 2.1", Checked = false, Dock = DockStyle.Fill });
+            _cbAnonymize = StyleCheckBox(new CheckBox { Text = "Анонимизация свойств", Checked = false, Dock = DockStyle.Fill });
+
+            pV3Grid.Controls.Add(_cbGeoShift, 0, 0);
+            pV3Grid.Controls.Add(_cbGrids, 1, 0);
+            pV3Grid.Controls.Add(_cbPipeTrace, 2, 0);
+            pV3Grid.Controls.Add(_cbBoq, 0, 1);
+            pV3Grid.Controls.Add(_cbBcf, 1, 1);
+            pV3Grid.Controls.Add(_cbAnonymize, 2, 1);
+            gbV3.Controls.Add(pV3Grid);
+
+            // 3.7: Лог
             _tbLog = new TextBox
             {
                 Multiline = true,
@@ -3209,11 +3310,11 @@ namespace NWD2DWG
                 Font = new Font("Consolas", 9f),
                 BackColor = ColInput,
                 ForeColor = Color.FromArgb(201, 209, 217),
-                BorderStyle = BorderStyle.FixedSingle,
-                Margin = new Padding(0, 6, 0, 0)
+                BorderStyle = BorderStyle.FixedSingle
             };
 
             pMain.Controls.Add(_tbLog);
+            pMain.Controls.Add(gbV3);
             pMain.Controls.Add(gbAdv);
             pMain.Controls.Add(gbOpt);
             pMain.Controls.Add(gbFmt);
@@ -3223,7 +3324,7 @@ namespace NWD2DWG
             _tbLog.BringToFront();
 
             Log.AddSink(AppendLog);
-            Log.Write("NWD2DWG v2.0 — запущен. Разработчик: BaidurovLabs (https://baidurovlabs.ru)");
+            Log.Write("NWD2DWG v3.0 — запущен. Разработчик: BaidurovLabs (https://baidurovlabs.ru)");
             Log.Write("Лицензия: GNU General Public License v3.0 (Свободное программное обеспечение)");
             Log.Write("Перетащите .nwd файл или папку в окно программы.");
 
@@ -3600,7 +3701,13 @@ namespace NWD2DWG
                 SolidDetect = _cbSolidDetect.Checked,
                 TransferXData = _cbXData.Checked,
                 TransferMaterials = _cbMaterials.Checked,
-                SelectionSets = sets
+                SelectionSets = sets,
+                GeoShift = _cbGeoShift.Checked,
+                ExportGrids = _cbGrids.Checked,
+                TracePipes = _cbPipeTrace.Checked,
+                ExportBoq = _cbBoq.Checked,
+                ExportBcf = _cbBcf.Checked,
+                Anonymize = _cbAnonymize.Checked
             };
         }
 
