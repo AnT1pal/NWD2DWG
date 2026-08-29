@@ -342,6 +342,10 @@ namespace NWD2DWG.Plugin
                                         continue;
                                     }
 
+                                    // === Selection Sets фильтр ===
+                                    if (allowedItems != null && !allowedItems.Contains(item.GetHashCode()))
+                                        continue;
+
                                     if (!item.HasGeometry) continue;
 
                                     InwOaPath3 oaPath = null;
@@ -366,6 +370,12 @@ namespace NWD2DWG.Plugin
                                         catch { }
                                     }
 
+                                    // === Прозрачность ===
+                                    int transparency = readTransparency != null ? readTransparency(item) : 0;
+
+                                    // === BIM свойства (XData) ===
+                                    Dictionary<string, string> bimProps = extractProperties != null ? extractProperties(item) : null;
+
                                     string layer = layersPerItem
                                         ? (!string.IsNullOrEmpty(item.DisplayName) ? item.DisplayName : cleanName)
                                         : cleanName;
@@ -381,12 +391,62 @@ namespace NWD2DWG.Plugin
 
                                         if (sink.TriCount > 0)
                                         {
+                                            var currentVerts = new List<double>(sink.Verts);
+                                            var currentQuads = new List<int>(sink.Quads);
+
+                                            // === Section Box crop ===
+                                            if (isInBox != null)
+                                            {
+                                                var filteredQuads = new List<int>();
+                                                for (int qi = 0; qi < currentQuads.Count; qi += 4)
+                                                {
+                                                    int a = currentQuads[qi], b = currentQuads[qi + 1], c = currentQuads[qi + 2];
+                                                    if (isInBox(
+                                                        currentVerts[a * 3], currentVerts[a * 3 + 1], currentVerts[a * 3 + 2],
+                                                        currentVerts[b * 3], currentVerts[b * 3 + 1], currentVerts[b * 3 + 2],
+                                                        currentVerts[c * 3], currentVerts[c * 3 + 1], currentVerts[c * 3 + 2]))
+                                                    {
+                                                        filteredQuads.Add(currentQuads[qi]);
+                                                        filteredQuads.Add(currentQuads[qi + 1]);
+                                                        filteredQuads.Add(currentQuads[qi + 2]);
+                                                        filteredQuads.Add(currentQuads[qi + 3]);
+                                                    }
+                                                }
+                                                currentQuads = filteredQuads;
+                                                if (currentQuads.Count == 0) continue;
+                                            }
+
+                                            // === Mesh Decimation ===
+                                            if (decimatePercent > 0 && decimatePercent <= 90)
+                                            {
+                                                double ratio = decimatePercent / 100.0;
+                                                MeshDecimator.Decimate(ref currentVerts, ref currentQuads, ratio);
+                                            }
+
                                             secFrags++;
                                             totalFragments++;
-                                            secTris += sink.TriCount;
-                                            totalTriangles += sink.TriCount;
-                                            totalVertices += sink.Verts.Count / 3;
-                                            secBatcher.AddGeometry(layer, rgb, sink.Verts, sink.Quads);
+                                            secTris += currentQuads.Count / 4;
+                                            totalTriangles += currentQuads.Count / 4;
+                                            totalVertices += currentVerts.Count / 3;
+
+                                            // === Solid Detection ===
+                                            if (solidDetect)
+                                            {
+                                                SolidResult solid = SolidReconstructor.TryReconstruct(currentVerts, currentQuads);
+                                                if (solid != null && solid.Type != SolidType.None && solid.Confidence > 0.7)
+                                                {
+                                                    SolidReconstructor.WriteSolidDxf(secWriter.RawWriter, solid, PluginDxfWriter.SanitizeLayer(layer), rgb);
+                                                    continue;
+                                                }
+                                            }
+
+                                            secBatcher.AddGeometry(layer, rgb, currentVerts, currentQuads, transparency);
+
+                                            // === XData ===
+                                            if (bimProps != null && bimProps.Count > 0)
+                                            {
+                                                secWriter.WriteXData(PluginDxfWriter.SanitizeLayer(layer), bimProps);
+                                            }
                                         }
                                     }
                                 }
@@ -923,16 +983,9 @@ namespace NWD2DWG.Plugin
                     _w.WriteLine("3DFACE");
                     _w.WriteLine("8");
                     _w.WriteLine(cleanLayer);
-                    if (_withColors && rgb > 0)
-                    {
-                        _w.WriteLine("420");
-                        _w.WriteLine(rgb.ToString(CultureInfo.InvariantCulture));
-                    }
-                    else
-                    {
-                        _w.WriteLine("62");
-                        _w.WriteLine("7");
-                    }
+                    int aci = (_withColors && rgb > 0) ? SolidReconstructor.RgbToAci(rgb) : 7;
+                    _w.WriteLine("62");
+                    _w.WriteLine(aci.ToString(CultureInfo.InvariantCulture));
                     _w.WriteLine("10");
                     _w.WriteLine(verts[i1].ToString("G12", CultureInfo.InvariantCulture));
                     _w.WriteLine("20");
@@ -972,16 +1025,9 @@ namespace NWD2DWG.Plugin
             _w.WriteLine("POLYLINE");
             _w.WriteLine("8");
             _w.WriteLine(cleanLayer);
-            if (_withColors && rgb > 0)
-            {
-                _w.WriteLine("420");
-                _w.WriteLine(rgb.ToString(CultureInfo.InvariantCulture));
-            }
-            else
-            {
-                _w.WriteLine("62");
-                _w.WriteLine("7");
-            }
+            int polyAci = (_withColors && rgb > 0) ? SolidReconstructor.RgbToAci(rgb) : 7;
+            _w.WriteLine("62");
+            _w.WriteLine(polyAci.ToString(CultureInfo.InvariantCulture));
             _w.WriteLine("66");
             _w.WriteLine("1");
             _w.WriteLine("70");

@@ -28,8 +28,10 @@ using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading;
+using System.Threading.Tasks;
 using System.Windows.Forms;
 using Microsoft.Win32;
+using NWD2DWG.Plugin;
 
 namespace NWD2DWG
 {
@@ -781,8 +783,9 @@ namespace NWD2DWG
                 _buf.AppendLine((faces.Count / 4).ToString(CultureInfo.InvariantCulture));
                 if (rgbColor >= 0)
                 {
-                    _buf.AppendLine("62"); _buf.AppendLine("256");
-                    _buf.AppendLine("420"); _buf.AppendLine(rgbColor.ToString(CultureInfo.InvariantCulture));
+                    int aci = SolidReconstructor.RgbToAci(rgbColor);
+                    _buf.AppendLine("62");
+                    _buf.AppendLine(aci.ToString(CultureInfo.InvariantCulture));
                 }
                 foreach (int vi in rev)
                 {
@@ -831,8 +834,9 @@ namespace NWD2DWG
             _buf.AppendLine(l);
             if (rgbColor >= 0)
             {
-                _buf.AppendLine("62"); _buf.AppendLine("256");
-                _buf.AppendLine("420"); _buf.AppendLine(rgbColor.ToString(CultureInfo.InvariantCulture));
+                int aci = SolidReconstructor.RgbToAci(rgbColor);
+                _buf.AppendLine("62");
+                _buf.AppendLine(aci.ToString(CultureInfo.InvariantCulture));
             }
             _buf.AppendLine("10"); _buf.AppendLine(Num(x1));
             _buf.AppendLine("20"); _buf.AppendLine(Num(y1));
@@ -2255,23 +2259,58 @@ namespace NWD2DWG
                             i++;
                         }
                         break;
-                    case "--visible": opts.ShowNavisworks = next == null || next != "0"; i++; break;
-                    case "--acadvisible": opts.ShowAutoCad = next == null || next != "0"; i++; break;
-                    case "--skiphidden": opts.SkipHidden = next == null || next != "0"; i++; break;
-                    case "--colors": opts.WithColors = next == null || next != "0"; i++; break;
-                    case "--layers": opts.LayersPerItem = next == null || next != "0"; i++; break;
-                    case "--split": opts.SplitDisciplines = next == null || next != "0"; i++; break;
-                    case "--navis": opts.NavisworksDir = next; i++; break;
+                    case "--visible":
+                        opts.ShowNavisworks = next == null || next.StartsWith("--") || (next != "0" && !next.Equals("false", StringComparison.OrdinalIgnoreCase));
+                        if (next != null && !next.StartsWith("--") && (next == "0" || next == "1" || next.Equals("true", StringComparison.OrdinalIgnoreCase) || next.Equals("false", StringComparison.OrdinalIgnoreCase))) i++;
+                        break;
+                    case "--acadvisible":
+                        opts.ShowAutoCad = next == null || next.StartsWith("--") || (next != "0" && !next.Equals("false", StringComparison.OrdinalIgnoreCase));
+                        if (next != null && !next.StartsWith("--") && (next == "0" || next == "1" || next.Equals("true", StringComparison.OrdinalIgnoreCase) || next.Equals("false", StringComparison.OrdinalIgnoreCase))) i++;
+                        break;
+                    case "--skiphidden":
+                    case "--skip-hidden":
+                        opts.SkipHidden = next == null || next.StartsWith("--") || (next != "0" && !next.Equals("false", StringComparison.OrdinalIgnoreCase));
+                        if (next != null && !next.StartsWith("--") && (next == "0" || next == "1" || next.Equals("true", StringComparison.OrdinalIgnoreCase) || next.Equals("false", StringComparison.OrdinalIgnoreCase))) i++;
+                        break;
+                    case "--colors":
+                    case "--color":
+                        opts.WithColors = next == null || next.StartsWith("--") || (next != "0" && !next.Equals("false", StringComparison.OrdinalIgnoreCase));
+                        if (next != null && !next.StartsWith("--") && (next == "0" || next == "1" || next.Equals("true", StringComparison.OrdinalIgnoreCase) || next.Equals("false", StringComparison.OrdinalIgnoreCase))) i++;
+                        break;
+                    case "--layers":
+                        opts.LayersPerItem = next == null || next.StartsWith("--") || (next != "0" && !next.Equals("false", StringComparison.OrdinalIgnoreCase));
+                        if (next != null && !next.StartsWith("--") && (next == "0" || next == "1" || next.Equals("true", StringComparison.OrdinalIgnoreCase) || next.Equals("false", StringComparison.OrdinalIgnoreCase))) i++;
+                        break;
+                    case "--split":
+                        opts.SplitDisciplines = next == null || next.StartsWith("--") || (next != "0" && !next.Equals("false", StringComparison.OrdinalIgnoreCase));
+                        if (next != null && !next.StartsWith("--") && (next == "0" || next == "1" || next.Equals("true", StringComparison.OrdinalIgnoreCase) || next.Equals("false", StringComparison.OrdinalIgnoreCase))) i++;
+                        break;
+                    case "--navis":
+                        opts.NavisworksDir = next; if (next != null && !next.StartsWith("--")) i++;
+                        break;
                     // === v2.0 CLI flags ===
                     case "--decimate":
-                        if (next != null) { int dp; if (int.TryParse(next, out dp)) opts.DecimatePercent = Math.Max(0, Math.Min(90, dp)); i++; }
+                        if (next != null && !next.StartsWith("--")) { int dp; if (int.TryParse(next, out dp)) opts.DecimatePercent = Math.Max(0, Math.Min(90, dp)); i++; }
                         break;
-                    case "--soliddetect": opts.SolidDetect = next == null || next != "0"; if (next != null) i++; break;
-                    case "--xdata": opts.TransferXData = next == null || next != "0"; if (next != null) i++; break;
-                    case "--materials": opts.TransferMaterials = next == null || next != "0"; if (next != null) i++; break;
-                    case "--sets": opts.SelectionSets = next ?? ""; i++; break;
+                    case "--solid":
+                    case "--soliddetect":
+                        opts.SolidDetect = next == null || next.StartsWith("--") || (next != "0" && !next.Equals("false", StringComparison.OrdinalIgnoreCase));
+                        if (next != null && !next.StartsWith("--") && (next == "0" || next == "1" || next.Equals("true", StringComparison.OrdinalIgnoreCase) || next.Equals("false", StringComparison.OrdinalIgnoreCase))) i++;
+                        break;
+                    case "--xdata":
+                        opts.TransferXData = next == null || next.StartsWith("--") || (next != "0" && !next.Equals("false", StringComparison.OrdinalIgnoreCase));
+                        if (next != null && !next.StartsWith("--") && (next == "0" || next == "1" || next.Equals("true", StringComparison.OrdinalIgnoreCase) || next.Equals("false", StringComparison.OrdinalIgnoreCase))) i++;
+                        break;
+                    case "--materials":
+                        opts.TransferMaterials = next == null || next.StartsWith("--") || (next != "0" && !next.Equals("false", StringComparison.OrdinalIgnoreCase));
+                        if (next != null && !next.StartsWith("--") && (next == "0" || next == "1" || next.Equals("true", StringComparison.OrdinalIgnoreCase) || next.Equals("false", StringComparison.OrdinalIgnoreCase))) i++;
+                        break;
+                    case "--sets":
+                        opts.SelectionSets = next != null && !next.StartsWith("--") ? next : "";
+                        if (next != null && !next.StartsWith("--")) i++;
+                        break;
                     case "--bbox":
-                        if (next != null)
+                        if (next != null && !next.StartsWith("--"))
                         {
                             string[] bp = next.Split(',');
                             if (bp.Length == 6)
@@ -2287,13 +2326,17 @@ namespace NWD2DWG
                         }
                         break;
                     case "--threads":
-                        if (next != null) { int tp; if (int.TryParse(next, out tp)) opts.ParallelThreads = tp; i++; }
+                        if (next != null && !next.StartsWith("--")) { int tp; if (int.TryParse(next, out tp)) opts.ParallelThreads = tp; i++; }
                         break;
-                    case "--watch": opts.WatchFolder = next ?? ""; i++; break;
+                    case "--watch":
+                        opts.WatchFolder = next != null && !next.StartsWith("--") ? next : "";
+                        if (next != null && !next.StartsWith("--")) i++;
+                        break;
                     case "--interval":
-                        if (next != null) { int iv; if (int.TryParse(next, out iv)) opts.WatchInterval = Math.Max(1, iv); i++; }
+                        if (next != null && !next.StartsWith("--")) { int iv; if (int.TryParse(next, out iv)) opts.WatchInterval = Math.Max(1, iv); i++; }
                         break;
                     default:
+                        if (a.StartsWith("--")) break;
                         if (opts.Input == null) opts.Input = a;
                         else if (outPath == null) outPath = a;
                         break;

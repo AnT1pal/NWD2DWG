@@ -423,8 +423,9 @@ namespace NWD2DWG.Plugin
             w.WriteLine(layer);
             if (color > 0)
             {
-                w.WriteLine("420");
-                w.WriteLine(color.ToString(culture));
+                int aci = RgbToAci(color);
+                w.WriteLine("62");
+                w.WriteLine(aci.ToString(culture));
             }
             else
             {
@@ -461,6 +462,30 @@ namespace NWD2DWG.Plugin
         private static void Write3DFace(StreamWriter w, string layer, int color, double x1, double y1, double z1, double[] p2, double[] p3, double[] p4)
         {
             Write3DFace(w, layer, color, new double[]{x1, y1, z1}, p2, p3, p4);
+        }
+
+        public static int RgbToAci(int rgb)
+        {
+            if (rgb < 0) return 7;
+            int r = (rgb >> 16) & 0xFF, g = (rgb >> 8) & 0xFF, b = rgb & 0xFF;
+            int[][] stdAci = new int[][]
+            {
+                new int[] { 1, 255, 0, 0 }, new int[] { 2, 255, 255, 0 }, new int[] { 3, 0, 255, 0 },
+                new int[] { 4, 0, 255, 255 }, new int[] { 5, 0, 0, 255 }, new int[] { 6, 255, 0, 255 },
+                new int[] { 7, 255, 255, 255 }, new int[] { 8, 128, 128, 128 }, new int[] { 9, 192, 192, 192 },
+                new int[] { 10, 255, 0, 0 }, new int[] { 30, 255, 127, 0 }, new int[] { 50, 255, 255, 0 },
+                new int[] { 90, 0, 255, 0 }, new int[] { 130, 0, 255, 255 }, new int[] { 170, 0, 0, 255 },
+                new int[] { 210, 255, 0, 255 }, new int[] { 250, 51, 51, 51 }, new int[] { 254, 214, 214, 214 }
+            };
+            int bestColor = 7;
+            double bestDist = double.MaxValue;
+            for (int i = 0; i < stdAci.Length; i++)
+            {
+                int dr = r - stdAci[i][1], dg = g - stdAci[i][2], db = b - stdAci[i][3];
+                double dist = dr * dr * 0.3 + dg * dg * 0.59 + db * db * 0.11;
+                if (dist < bestDist) { bestDist = dist; bestColor = stdAci[i][0]; }
+            }
+            return bestColor;
         }
     }
 }
