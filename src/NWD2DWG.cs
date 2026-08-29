@@ -2211,16 +2211,26 @@ namespace NWD2DWG
             if (cmd == "--screenshot")
             {
                 string shotPath = args.Length > 1 ? args[1] : "screenshot.png";
-                var form = new MainForm();
-                form.CreateControl();
-                form.Size = new Size(980, 900);
-                form.PerformLayout();
-                using (var bmp = RenderControlTree(form))
+                try
                 {
-                    bmp.Save(shotPath, System.Drawing.Imaging.ImageFormat.Png);
+                    var form = new MainForm();
+                    form.StartPosition = FormStartPosition.Manual;
+                    form.Location = new Point(50, 50);
+                    form.Size = new Size(1020, 940);
+                    form.Show();
+                    for (int s = 0; s < 10; s++) { Application.DoEvents(); Thread.Sleep(50); }
+                    using (var bmp = new Bitmap(form.Width, form.Height))
+                    {
+                        form.DrawToBitmap(bmp, new Rectangle(0, 0, form.Width, form.Height));
+                        bmp.Save(shotPath, System.Drawing.Imaging.ImageFormat.Png);
+                    }
+                    form.Close();
+                    File.WriteAllText(shotPath + ".txt", "Saved " + shotPath + " at " + DateTime.Now);
                 }
-                form.Dispose();
-                Console.WriteLine("Screenshot saved to: " + shotPath);
+                catch (Exception ex)
+                {
+                    File.WriteAllText(shotPath + ".err.txt", ex.ToString());
+                }
                 return 0;
             }
 
@@ -2673,42 +2683,16 @@ namespace NWD2DWG
                 Margin = new Padding(0, 0, 0, 4)
             };
 
-            var pActionRow = new Panel
+            var pActionTable = new TableLayoutPanel
             {
                 Dock = DockStyle.Fill,
-                Padding = new Padding(0, 6, 0, 0)
+                ColumnCount = 2,
+                RowCount = 1,
+                Padding = new Padding(0, 4, 0, 0)
             };
-
-            var pButtons = new FlowLayoutPanel
-            {
-                Dock = DockStyle.Right,
-                AutoSize = true,
-                AutoSizeMode = AutoSizeMode.GrowAndShrink,
-                FlowDirection = FlowDirection.LeftToRight,
-                WrapContents = false,
-                Margin = new Padding(0)
-            };
-
-            _btnConvert = StyleButton(new Button { Text = "▶  Конвертировать", Width = 160, Height = 36, Font = new Font("Segoe UI", 9.5f, FontStyle.Bold) }, true);
-            _btnConvert.Click += (s, e) => StartConvert();
-
-            _btnCancel = StyleButton(new Button { Text = "Отмена", Width = 88, Height = 36, Enabled = false }, false);
-            _btnCancel.Click += (s, e) => { _cancel = true; _btnCancel.Enabled = false; _lbStatus.Text = "Отмена…"; };
-
-            _btnDiag = StyleButton(new Button { Text = "Диагностика", Width = 115, Height = 36 }, false);
-            _btnDiag.Click += (s, e) => RunDiag();
-
-            _btnLogs = StyleButton(new Button { Text = "Логи", Width = 80, Height = 36 }, false);
-            _btnLogs.Click += (s, e) => OpenLogs();
-
-            _btnAbout = StyleButton(new Button { Text = "О программе", Width = 115, Height = 36 }, false);
-            _btnAbout.Click += (s, e) => ShowAbout();
-
-            pButtons.Controls.Add(_btnConvert);
-            pButtons.Controls.Add(_btnCancel);
-            pButtons.Controls.Add(_btnDiag);
-            pButtons.Controls.Add(_btnLogs);
-            pButtons.Controls.Add(_btnAbout);
+            pActionTable.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            pActionTable.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+            pActionTable.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
 
             _lbStatus = new System.Windows.Forms.Label
             {
@@ -2719,11 +2703,41 @@ namespace NWD2DWG
                 Font = new Font("Segoe UI", 9f)
             };
 
-            // ВАЖНО: сначала добавляем Dock=Right, затем Dock=Fill, чтобы кнопки не ужимались!
-            pActionRow.Controls.Add(_lbStatus);
-            pActionRow.Controls.Add(pButtons);
+            var pButtons = new FlowLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                AutoSize = true,
+                AutoSizeMode = AutoSizeMode.GrowAndShrink,
+                FlowDirection = FlowDirection.LeftToRight,
+                WrapContents = false,
+                Margin = new Padding(0)
+            };
 
-            pBottom.Controls.Add(pActionRow);
+            _btnConvert = StyleButton(new Button { Text = "▶  Конвертировать", Width = 205, Height = 36, Font = new Font("Segoe UI", 9.5f, FontStyle.Bold) }, true);
+            _btnConvert.Click += (s, e) => StartConvert();
+
+            _btnCancel = StyleButton(new Button { Text = "Отмена", Width = 90, Height = 36, Enabled = false }, false);
+            _btnCancel.Click += (s, e) => { _cancel = true; _btnCancel.Enabled = false; _lbStatus.Text = "Отмена…"; };
+
+            _btnDiag = StyleButton(new Button { Text = "Диагностика", Width = 130, Height = 36 }, false);
+            _btnDiag.Click += (s, e) => RunDiag();
+
+            _btnLogs = StyleButton(new Button { Text = "Логи", Width = 85, Height = 36 }, false);
+            _btnLogs.Click += (s, e) => OpenLogs();
+
+            _btnAbout = StyleButton(new Button { Text = "О программе", Width = 145, Height = 36 }, false);
+            _btnAbout.Click += (s, e) => ShowAbout();
+
+            pButtons.Controls.Add(_btnConvert);
+            pButtons.Controls.Add(_btnCancel);
+            pButtons.Controls.Add(_btnDiag);
+            pButtons.Controls.Add(_btnLogs);
+            pButtons.Controls.Add(_btnAbout);
+
+            pActionTable.Controls.Add(_lbStatus, 0, 0);
+            pActionTable.Controls.Add(pButtons, 1, 0);
+
+            pBottom.Controls.Add(pActionTable);
             pBottom.Controls.Add(_pb);
             Controls.Add(pBottom);
 
@@ -2741,16 +2755,16 @@ namespace NWD2DWG
             var gbIn = new DarkPanelGroup
             {
                 Title = " Исходный файл Navisworks (.nwd / .nwc / .nwf) ",
-                Height = 72,
+                Height = 74,
                 Dock = DockStyle.Top,
                 Margin = new Padding(0, 0, 0, 6)
             };
 
             var pInRow = new Panel { Dock = DockStyle.Fill };
-            var pInActions = new Panel { Dock = DockStyle.Right, Width = 230, Height = 32 };
+            var pInActions = new Panel { Dock = DockStyle.Right, Width = 260, Height = 32 };
             var btnIn = StyleButton(new Button { Text = "Обзор…", Width = 88, Height = 28, Dock = DockStyle.Left }, false);
             btnIn.Click += (s, e) => BrowseInput();
-            _cbBatch = StyleCheckBox(new CheckBox { Text = "Папка целиком", Dock = DockStyle.Right, Width = 130, Padding = new Padding(10, 4, 0, 0) });
+            _cbBatch = StyleCheckBox(new CheckBox { Text = "Папка целиком", AutoSize = true, Dock = DockStyle.Right, Padding = new Padding(8, 4, 0, 0) });
             pInActions.Controls.Add(_cbBatch);
             pInActions.Controls.Add(btnIn);
 
@@ -2767,7 +2781,7 @@ namespace NWD2DWG
             var gbOut = new DarkPanelGroup
             {
                 Title = " Папка для сохранения (пусто = рядом с исходником) ",
-                Height = 72,
+                Height = 74,
                 Dock = DockStyle.Top,
                 Margin = new Padding(0, 0, 0, 6)
             };
@@ -2789,21 +2803,28 @@ namespace NWD2DWG
             var gbFmt = new DarkPanelGroup
             {
                 Title = " Формат вывода ",
-                Height = 92,
+                Height = 98,
                 Dock = DockStyle.Top,
                 Margin = new Padding(0, 0, 0, 6)
             };
-            var pFmtFlow = new FlowLayoutPanel
+            var pFmtGrid = new TableLayoutPanel
             {
                 Dock = DockStyle.Fill,
-                WrapContents = true,
-                Padding = new Padding(4, 4, 4, 0)
+                ColumnCount = 3,
+                RowCount = 2,
+                Padding = new Padding(4, 2, 4, 0)
             };
-            _rbPolyface = StyleRadio(new RadioButton { Text = "DXF — полигональная сетка (рекомендуется)", Checked = true, AutoSize = true, Margin = new Padding(4, 4, 20, 6) });
-            _rb3dFace = StyleRadio(new RadioButton { Text = "DXF — 3DFACE (макс. совместимость)", AutoSize = true, Margin = new Padding(4, 4, 20, 6) });
-            _rbDwg = StyleRadio(new RadioButton { Text = "DWG — через AutoCAD", AutoSize = true, Margin = new Padding(4, 4, 20, 6) });
-            _rbGltf = StyleRadio(new RadioButton { Text = "glTF / GLB — Web / VR / Blender", AutoSize = true, Margin = new Padding(4, 4, 20, 6) });
-            _rbIfc = StyleRadio(new RadioButton { Text = "IFC 2x3 — BIM-координация", AutoSize = true, Margin = new Padding(4, 4, 20, 6) });
+            pFmtGrid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 38));
+            pFmtGrid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 32));
+            pFmtGrid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 30));
+            pFmtGrid.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));
+            pFmtGrid.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));
+
+            _rbPolyface = StyleRadio(new RadioButton { Text = "DXF (Polyface Mesh)", Checked = true, Dock = DockStyle.Fill });
+            _rb3dFace = StyleRadio(new RadioButton { Text = "DXF (3DFACE)", Dock = DockStyle.Fill });
+            _rbDwg = StyleRadio(new RadioButton { Text = "DWG (через AutoCAD)", Dock = DockStyle.Fill });
+            _rbGltf = StyleRadio(new RadioButton { Text = "glTF / GLB (Web / VR / 3D)", Dock = DockStyle.Fill });
+            _rbIfc = StyleRadio(new RadioButton { Text = "IFC 2x3 (BIM-координация)", Dock = DockStyle.Fill });
             _rbDwg.CheckedChanged += (s, e) =>
             {
                 if (_rbDwg.Checked)
@@ -2817,18 +2838,18 @@ namespace NWD2DWG
                     _cbShowAcad.AutoCheck = false;
                 }
             };
-            pFmtFlow.Controls.Add(_rbPolyface);
-            pFmtFlow.Controls.Add(_rb3dFace);
-            pFmtFlow.Controls.Add(_rbDwg);
-            pFmtFlow.Controls.Add(_rbGltf);
-            pFmtFlow.Controls.Add(_rbIfc);
-            gbFmt.Controls.Add(pFmtFlow);
+            pFmtGrid.Controls.Add(_rbPolyface, 0, 0);
+            pFmtGrid.Controls.Add(_rb3dFace, 1, 0);
+            pFmtGrid.Controls.Add(_rbDwg, 2, 0);
+            pFmtGrid.Controls.Add(_rbGltf, 0, 1);
+            pFmtGrid.Controls.Add(_rbIfc, 1, 1);
+            gbFmt.Controls.Add(pFmtGrid);
 
             // 3.4: Параметры
             var gbOpt = new DarkPanelGroup
             {
                 Title = " Параметры конвертации ",
-                Height = 96,
+                Height = 98,
                 Dock = DockStyle.Top,
                 Margin = new Padding(0, 0, 0, 6)
             };
@@ -2843,11 +2864,11 @@ namespace NWD2DWG
             pOptGrid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 36));
             pOptGrid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 32));
             pOptGrid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 32));
-            pOptGrid.RowStyles.Add(new RowStyle(SizeType.Absolute, 32));
-            pOptGrid.RowStyles.Add(new RowStyle(SizeType.Absolute, 32));
+            pOptGrid.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));
+            pOptGrid.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));
 
             _cbSplit = StyleCheckBox(new CheckBox { Text = "Разбивать по разделам (XREF)", Checked = true, Dock = DockStyle.Fill });
-            _cbSkipHidden = StyleCheckBox(new CheckBox { Text = "Пропускать скрытые элементы", Checked = true, Dock = DockStyle.Fill });
+            _cbSkipHidden = StyleCheckBox(new CheckBox { Text = "Пропускать скрытые", Checked = true, Dock = DockStyle.Fill });
             _cbShowNw = StyleCheckBox(new CheckBox { Text = "Показывать окно Navisworks", Checked = true, Dock = DockStyle.Fill });
             _cbColors = StyleCheckBox(new CheckBox { Text = "Переносить цвета элементов", Checked = false, Dock = DockStyle.Fill });
             _cbLayers = StyleCheckBox(new CheckBox { Text = "Отдельный слой на элемент", Checked = false, Dock = DockStyle.Fill });
@@ -2867,7 +2888,7 @@ namespace NWD2DWG
             var gbAdv = new DarkPanelGroup
             {
                 Title = " Расширенные параметры v2.0 ",
-                Height = 145,
+                Height = 152,
                 Dock = DockStyle.Top,
                 Margin = new Padding(0, 0, 0, 6)
             };
@@ -2879,12 +2900,12 @@ namespace NWD2DWG
                 RowCount = 3,
                 Padding = new Padding(4, 2, 4, 0)
             };
-            pAdvGrid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 38));
-            pAdvGrid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 31));
-            pAdvGrid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 31));
-            pAdvGrid.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
-            pAdvGrid.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
-            pAdvGrid.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
+            pAdvGrid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 36));
+            pAdvGrid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 32));
+            pAdvGrid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 32));
+            pAdvGrid.RowStyles.Add(new RowStyle(SizeType.Absolute, 36));
+            pAdvGrid.RowStyles.Add(new RowStyle(SizeType.Absolute, 32));
+            pAdvGrid.RowStyles.Add(new RowStyle(SizeType.Absolute, 32));
 
             // Ряд 1: Слайдер декимации
             var pDecRow = new Panel { Dock = DockStyle.Fill };
@@ -2893,8 +2914,9 @@ namespace NWD2DWG
                 Text = "Сжатие сетки (LOD):",
                 ForeColor = ColText,
                 Dock = DockStyle.Left,
-                Width = 150,
-                TextAlign = ContentAlignment.MiddleLeft
+                AutoSize = true,
+                TextAlign = ContentAlignment.MiddleLeft,
+                Padding = new Padding(0, 4, 10, 0)
             };
             _tbDecimate = new TrackBar
             {
@@ -2936,11 +2958,12 @@ namespace NWD2DWG
             var pSetsRow = new Panel { Dock = DockStyle.Fill };
             var lbSets = new System.Windows.Forms.Label
             {
-                Text = "Выборки (Sets):",
+                Text = "Наборы (Sets):",
                 ForeColor = ColText,
                 Dock = DockStyle.Left,
-                Width = 120,
-                TextAlign = ContentAlignment.MiddleLeft
+                AutoSize = true,
+                TextAlign = ContentAlignment.MiddleLeft,
+                Padding = new Padding(0, 6, 8, 0)
             };
             _tbSets = new TextBox
             {
