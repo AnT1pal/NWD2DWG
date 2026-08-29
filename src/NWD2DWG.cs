@@ -2329,6 +2329,56 @@ namespace NWD2DWG
                 string cmd = args[0].ToLowerInvariant();
                 AttachConsole(-1);
 
+                if (cmd == "--screenshot-license")
+                {
+                    string shotPath = args.Length > 1 ? args[1] : "license.png";
+                    try
+                    {
+                        var dlg = MainForm.CreateLicenseForm();
+                        dlg.StartPosition = FormStartPosition.Manual;
+                        dlg.Location = new Point(50, 50);
+                        dlg.Show();
+                        dlg.Refresh();
+                        for (int s = 0; s < 10; s++) { Application.DoEvents(); Thread.Sleep(30); }
+                        using (var bmp = new Bitmap(dlg.Width, dlg.Height))
+                        {
+                            dlg.DrawToBitmap(bmp, new Rectangle(0, 0, dlg.Width, dlg.Height));
+                            bmp.Save(shotPath, System.Drawing.Imaging.ImageFormat.Png);
+                        }
+                        dlg.Close();
+                    }
+                    catch (Exception ex)
+                    {
+                        File.WriteAllText(shotPath + ".err.txt", ex.ToString());
+                    }
+                    return 0;
+                }
+
+                if (cmd == "--screenshot-about")
+                {
+                    string shotPath = args.Length > 1 ? args[1] : "about.png";
+                    try
+                    {
+                        var dlg = MainForm.CreateAboutForm();
+                        dlg.StartPosition = FormStartPosition.Manual;
+                        dlg.Location = new Point(50, 50);
+                        dlg.Show();
+                        dlg.Refresh();
+                        for (int s = 0; s < 10; s++) { Application.DoEvents(); Thread.Sleep(30); }
+                        using (var bmp = new Bitmap(dlg.Width, dlg.Height))
+                        {
+                            dlg.DrawToBitmap(bmp, new Rectangle(0, 0, dlg.Width, dlg.Height));
+                            bmp.Save(shotPath, System.Drawing.Imaging.ImageFormat.Png);
+                        }
+                        dlg.Close();
+                    }
+                    catch (Exception ex)
+                    {
+                        File.WriteAllText(shotPath + ".err.txt", ex.ToString());
+                    }
+                    return 0;
+                }
+
                 if (cmd == "--selftest") return SelfTest.Run(args);
                 if (cmd == "--diagnostics")
                 {
@@ -2348,7 +2398,7 @@ namespace NWD2DWG
                     Console.WriteLine(string.Format("Очищено {0:F1} МБ во временной папке.", freed / 1048576.0));
                     return 0;
                 }
-                if (cmd == "--convert" || cmd == "--probe" || cmd == "--watch" || cmd == "--screenshot")
+                if (cmd == "--convert" || cmd == "--probe" || cmd == "--watch" || cmd.StartsWith("--screenshot"))
                 {
                     try { return Cli(cmd, args); }
                     catch (Exception ex)
@@ -2436,6 +2486,60 @@ namespace NWD2DWG
                         }
                     }
                     File.WriteAllText(shotPath + ".txt", sb.ToString());
+                }
+                catch (Exception ex)
+                {
+                    File.WriteAllText(shotPath + ".err.txt", ex.ToString());
+                }
+                return 0;
+            }
+
+            if (cmd == "--screenshot-license")
+            {
+                string shotPath = args.Length > 1 ? args[1] : "license.png";
+                try
+                {
+                    using (var dlg = MainForm.CreateLicenseForm())
+                    {
+                        dlg.StartPosition = FormStartPosition.Manual;
+                        dlg.Location = new Point(50, 50);
+                        dlg.Show();
+                        dlg.Refresh();
+                        for (int s = 0; s < 10; s++) { Application.DoEvents(); Thread.Sleep(30); }
+                        using (var bmp = new Bitmap(dlg.Width, dlg.Height))
+                        {
+                            dlg.DrawToBitmap(bmp, new Rectangle(0, 0, dlg.Width, dlg.Height));
+                            bmp.Save(shotPath, System.Drawing.Imaging.ImageFormat.Png);
+                        }
+                        dlg.Close();
+                    }
+                }
+                catch (Exception ex)
+                {
+                    File.WriteAllText(shotPath + ".err.txt", ex.ToString());
+                }
+                return 0;
+            }
+
+            if (cmd == "--screenshot-about")
+            {
+                string shotPath = args.Length > 1 ? args[1] : "about.png";
+                try
+                {
+                    using (var dlg = MainForm.CreateAboutForm())
+                    {
+                        dlg.StartPosition = FormStartPosition.Manual;
+                        dlg.Location = new Point(50, 50);
+                        dlg.Show();
+                        dlg.Refresh();
+                        for (int s = 0; s < 10; s++) { Application.DoEvents(); Thread.Sleep(30); }
+                        using (var bmp = new Bitmap(dlg.Width, dlg.Height))
+                        {
+                            dlg.DrawToBitmap(bmp, new Rectangle(0, 0, dlg.Width, dlg.Height));
+                            bmp.Save(shotPath, System.Drawing.Imaging.ImageFormat.Png);
+                        }
+                        dlg.Close();
+                    }
                 }
                 catch (Exception ex)
                 {
@@ -3348,86 +3452,287 @@ namespace NWD2DWG
             };
         }
 
+        public static Form CreateLicenseForm()
+        {
+            var dlg = new Form
+            {
+                Text = "Лицензионное соглашение — GNU General Public License v3.0",
+                Width = 840,
+                Height = 620,
+                StartPosition = FormStartPosition.CenterScreen,
+                BackColor = ColBg,
+                ForeColor = ColText,
+                Font = new Font("Segoe UI", 9f),
+                FormBorderStyle = FormBorderStyle.FixedDialog,
+                MaximizeBox = false,
+                MinimizeBox = false
+            };
+
+            var pRoot = new TableLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                ColumnCount = 1,
+                RowCount = 3,
+                BackColor = ColBg,
+                Padding = new Padding(16, 12, 16, 12)
+            };
+            pRoot.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            pRoot.RowStyles.Add(new RowStyle(SizeType.Absolute, 55));
+            pRoot.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+            pRoot.RowStyles.Add(new RowStyle(SizeType.Absolute, 46));
+
+            var pTop = new Panel { Dock = DockStyle.Fill, Margin = new Padding(0) };
+            var lbHead = new System.Windows.Forms.Label
+            {
+                Text = "NWD2DWG распространяется под лицензией GNU GPL v3",
+                Font = new Font("Segoe UI", 11.5f, FontStyle.Bold),
+                ForeColor = ColAccent,
+                Location = new Point(0, 2),
+                AutoSize = true
+            };
+            var lbSub = new System.Windows.Forms.Label
+            {
+                Text = "Свободное ПО с открытым исходным кодом. Автор: Baidurov Pavel (BaidurovLabs)",
+                Location = new Point(0, 28),
+                ForeColor = ColTextMuted,
+                AutoSize = true
+            };
+            pTop.Controls.Add(lbHead);
+            pTop.Controls.Add(lbSub);
+
+            var pBorder = new Panel
+            {
+                Dock = DockStyle.Fill,
+                BackColor = ColBorder,
+                Padding = new Padding(1),
+                Margin = new Padding(0, 4, 0, 4)
+            };
+            var tbLic = new TextBox
+            {
+                Dock = DockStyle.Fill,
+                Multiline = true,
+                ReadOnly = true,
+                ScrollBars = ScrollBars.Vertical,
+                Font = new Font("Consolas", 9f),
+                BackColor = ColInput,
+                ForeColor = Color.FromArgb(220, 227, 235),
+                BorderStyle = BorderStyle.None,
+                TabStop = false
+            };
+
+            string licPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "LICENSE");
+            if (File.Exists(licPath))
+            {
+                try { tbLic.Text = File.ReadAllText(licPath, Encoding.UTF8); } catch { }
+            }
+            if (string.IsNullOrEmpty(tbLic.Text))
+            {
+                tbLic.Text = "GNU GENERAL PUBLIC LICENSE\r\nVersion 3, 29 June 2007\r\n\r\n" +
+                             "Copyright (C) 2026 Baidurov Pavel / BaidurovLabs (https://baidurovlabs.ru)\r\n\r\n" +
+                             "Everyone is permitted to copy and distribute verbatim copies\r\nof this license document, but changing it is not allowed.\r\n\r\n" +
+                             "Preamble\r\n\r\n" +
+                             "The GNU General Public License is a free, copyleft license for\r\nsoftware and other kinds of works.\r\n\r\n" +
+                             "The licenses for most software and other practical works are designed\r\nto take away your freedom to share and change the works. By contrast,\r\nthe GNU General Public License is intended to guarantee your freedom to\r\nshare and change all versions of a program--to make sure it remains free\r\nsoftware for all its users.\r\n\r\n" +
+                             "This program is distributed in the hope that it will be useful,\r\nbut WITHOUT ANY WARRANTY; without even the implied warranty of\r\nMERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the\r\nGNU General Public License for more details.\r\n\r\n" +
+                             "You should have received a copy of the GNU General Public License\r\nalong with this program. If not, see <https://www.gnu.org/licenses/>.";
+            }
+            pBorder.Controls.Add(tbLic);
+
+            var pBot = new TableLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                ColumnCount = 2,
+                RowCount = 1,
+                Margin = new Padding(0, 6, 0, 0)
+            };
+            pBot.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            pBot.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 130));
+
+            var lnkGnu = new LinkLabel
+            {
+                Text = "Открыть текст GPLv3 на gnu.org",
+                LinkColor = Color.FromArgb(88, 166, 255),
+                ActiveLinkColor = Color.FromArgb(165, 214, 255),
+                VisitedLinkColor = Color.FromArgb(88, 166, 255),
+                Font = new Font("Segoe UI", 9f),
+                AutoSize = true,
+                Anchor = AnchorStyles.Left,
+                Margin = new Padding(0, 6, 0, 0)
+            };
+            lnkGnu.LinkClicked += (s, e) => { try { Process.Start(new ProcessStartInfo("https://www.gnu.org/licenses/gpl-3.0.html") { UseShellExecute = true }); } catch { } };
+
+            var btnOk = StyleButton(new Button { Text = "Понятно", Width = 120, Height = 34, DialogResult = DialogResult.OK, TabStop = true }, true);
+            btnOk.Anchor = AnchorStyles.Right;
+
+            pBot.Controls.Add(lnkGnu, 0, 0);
+            pBot.Controls.Add(btnOk, 1, 0);
+
+            pRoot.Controls.Add(pTop, 0, 0);
+            pRoot.Controls.Add(pBorder, 0, 1);
+            pRoot.Controls.Add(pBot, 0, 2);
+
+            dlg.Controls.Add(pRoot);
+            dlg.AcceptButton = btnOk;
+            dlg.Shown += (s, e) => { btnOk.Focus(); tbLic.SelectionLength = 0; };
+            return dlg;
+        }
+
         void ShowLicenseDialog()
         {
-            using (var dlg = new Form())
+            using (var dlg = CreateLicenseForm())
             {
-                dlg.Text = "Лицензионное соглашение — GNU General Public License v3.0";
-                dlg.Width = 720;
-                dlg.Height = 560;
                 dlg.StartPosition = FormStartPosition.CenterParent;
-                dlg.BackColor = ColBg;
-                dlg.ForeColor = ColText;
-                dlg.Font = new Font("Segoe UI", 9f);
-                dlg.FormBorderStyle = FormBorderStyle.FixedDialog;
-                dlg.MaximizeBox = false;
-                dlg.MinimizeBox = false;
+                dlg.ShowDialog(this);
+            }
+        }
 
-                var pTop = new Panel { Dock = DockStyle.Top, Height = 60, Padding = new Padding(16, 12, 16, 0) };
-                var lbHead = new System.Windows.Forms.Label
-                {
-                    Text = "NWD2DWG распространяется под лицензией GNU GPL v3",
-                    Font = new Font("Segoe UI", 11f, FontStyle.Bold),
-                    ForeColor = ColAccent,
-                    AutoSize = true
-                };
-                var lbSub = new System.Windows.Forms.Label
-                {
-                    Text = "Свободное программное обеспечение. Автор: Baidurov Pavel (https://baidurovlabs.ru)",
-                    Location = new Point(16, 32),
-                    ForeColor = ColTextMuted,
-                    AutoSize = true
-                };
-                pTop.Controls.Add(lbHead);
-                pTop.Controls.Add(lbSub);
+        public static Form CreateAboutForm()
+        {
+            var dlg = new Form
+            {
+                Text = "О программе NWD2DWG v3.0",
+                Width = 840,
+                Height = 640,
+                StartPosition = FormStartPosition.CenterScreen,
+                BackColor = ColBg,
+                ForeColor = ColText,
+                Font = new Font("Segoe UI", 9f),
+                FormBorderStyle = FormBorderStyle.FixedDialog,
+                MaximizeBox = false,
+                MinimizeBox = false
+            };
 
-                var tbLic = new TextBox
-                {
-                    Dock = DockStyle.Fill,
-                    Multiline = true,
-                    ReadOnly = true,
-                    ScrollBars = ScrollBars.Vertical,
-                    Font = new Font("Consolas", 8.5f),
-                    BackColor = ColInput,
-                    ForeColor = Color.FromArgb(201, 209, 217),
-                    BorderStyle = BorderStyle.FixedSingle,
-                    Margin = new Padding(16)
-                };
+            var pRoot = new TableLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                ColumnCount = 1,
+                RowCount = 3,
+                BackColor = ColBg,
+                Padding = new Padding(16, 12, 16, 12)
+            };
+            pRoot.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            pRoot.RowStyles.Add(new RowStyle(SizeType.Absolute, 55));
+            pRoot.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+            pRoot.RowStyles.Add(new RowStyle(SizeType.Absolute, 46));
 
-                string licPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "LICENSE");
-                if (File.Exists(licPath))
-                {
-                    try { tbLic.Text = File.ReadAllText(licPath, Encoding.UTF8); } catch { }
-                }
-                if (string.IsNullOrEmpty(tbLic.Text))
-                {
-                    tbLic.Text = "NWD2DWG - Navisworks to AutoCAD 3D Mesh Converter\r\n" +
-                                 "Copyright (C) 2026 Baidurov Pavel / BaidurovLabs (https://baidurovlabs.ru)\r\n\r\n" +
-                                 "This program is free software: you can redistribute it and/or modify\r\n" +
-                                 "it under the terms of the GNU General Public License as published by\r\n" +
-                                 "the Free Software Foundation, either version 3 of the License, or\r\n" +
-                                 "(at your option) any later version.\r\n\r\n" +
-                                 "This program is distributed in the hope that it will be useful,\r\n" +
-                                 "but WITHOUT ANY WARRANTY; without even the implied warranty of\r\n" +
-                                 "MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the\r\n" +
-                                 "GNU General Public License for more details.\r\n\r\n" +
-                                 "You should have received a copy of the GNU General Public License\r\n" +
-                                 "along with this program. If not, see <https://www.gnu.org/licenses/>.";
-                }
+            var pTop = new Panel { Dock = DockStyle.Fill, Margin = new Padding(0) };
+            var lbHead = new System.Windows.Forms.Label
+            {
+                Text = "NWD2DWG v3.0 | BIM-конвертер Navisworks",
+                Font = new Font("Segoe UI", 12f, FontStyle.Bold),
+                ForeColor = ColAccent,
+                Location = new Point(0, 2),
+                AutoSize = true
+            };
+            var lbSub = new System.Windows.Forms.Label
+            {
+                Text = "Разработчик: Baidurov Pavel (BaidurovLabs) | Лицензия: GNU General Public License v3.0",
+                Location = new Point(0, 28),
+                ForeColor = ColTextMuted,
+                AutoSize = true
+            };
+            pTop.Controls.Add(lbHead);
+            pTop.Controls.Add(lbSub);
 
-                var pBot = new Panel { Dock = DockStyle.Bottom, Height = 50, Padding = new Padding(16, 8, 16, 8) };
-                var btnOk = StyleButton(new Button { Text = "Понятно", Width = 110, Height = 32, DialogResult = DialogResult.OK }, true);
-                btnOk.Location = new Point(dlg.Width - 145, 8);
-                btnOk.Anchor = AnchorStyles.Right | AnchorStyles.Top;
-                pBot.Controls.Add(btnOk);
+            var pBorder = new Panel
+            {
+                Dock = DockStyle.Fill,
+                BackColor = ColBorder,
+                Padding = new Padding(1),
+                Margin = new Padding(0, 4, 0, 4)
+            };
+            var tbAbout = new TextBox
+            {
+                Dock = DockStyle.Fill,
+                Multiline = true,
+                ReadOnly = true,
+                ScrollBars = ScrollBars.Vertical,
+                Font = new Font("Segoe UI", 9.5f),
+                BackColor = ColInput,
+                ForeColor = Color.FromArgb(220, 227, 235),
+                BorderStyle = BorderStyle.None,
+                TabStop = false
+            };
 
-                var pMiddle = new Panel { Dock = DockStyle.Fill, Padding = new Padding(16, 0, 16, 0) };
-                pMiddle.Controls.Add(tbLic);
+            tbAbout.Text = "NWD2DWG — универсальный высокопроизводительный BIM-конвертер геометрии Navisworks (.NWD, .NWC, .NWF) в форматы AutoCAD (.DWG, .DXF), glTF/GLB (Web/VR) и IFC 2x3 (BIM-координация).\r\n\r\n" +
+                           "► Инженерные возможности v3.0:\r\n" +
+                           " • Сдвиг к нулю (0,0,0) + .wld — устранение графического дребезга на гигантских геодезических координатах\r\n" +
+                           " • Оси и уровни (_GRIDS) — автоматическое извлечение координационных сеток и высотных отметок здания\r\n" +
+                           " • Оси труб (DN/L) — скелетизация трубопроводных сетей с сохранением диаметров и длин участков\r\n" +
+                           " • Смета ВОР в Excel/CSV — расчёт объёмов работ, площадей сеток и длин материалов по категориям\r\n" +
+                           " • Коллизии BCF 2.1 — экспорт проверок Clash Detective в открытый стандарт BCF Zip с привязкой точек\r\n" +
+                           " • 3D BIM Diff — геометрическое сравнение двух версий моделей с подсветкой новых, удалённых и изменённых тел\r\n" +
+                           " • Пространственный тайлинг — нарезка площадок на сектора для лёгкой работы в AutoCAD через XREF\r\n" +
+                           " • Анонимизация свойств — удаление коммерческих атрибутов и персональных данных перед передачей модели\r\n" +
+                           " • TempCleaner — автоматическая и ручная очистка промежуточного кэша\r\n\r\n" +
+                           "► Базовое ядро v2.0:\r\n" +
+                           " • QEM Mesh Decimation — адаптивное сжатие полигональных сеток на 0-90% без искажения геометрии\r\n" +
+                           " • Solid Reconstructor — PCA-распознавание примитивов и тел (цилиндры, трубы, балки, коробки)\r\n" +
+                           " • BIM Attribute Transfer — перенос всех вкладок свойств элементов Navisworks в AutoCAD XData\r\n" +
+                           " • glTF 2.0 / GLB и IFC 2x3 — прямой экспорт в открытые 3D и BIM форматы с материалами и PBR\r\n" +
+                           " • BIM Watchdog — автоматическая фоновая служба мониторинга и пакетной конвертации директорий\r\n\r\n" +
+                           "Совместимость: Autodesk Navisworks 2020-2026, AutoCAD 2018-2026, NanoCAD, Blender, Unity.";
+            pBorder.Controls.Add(tbAbout);
 
-                dlg.Controls.Add(pMiddle);
-                dlg.Controls.Add(pBot);
-                dlg.Controls.Add(pTop);
+            var pBot = new TableLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                ColumnCount = 3,
+                RowCount = 1,
+                Margin = new Padding(0, 6, 0, 0)
+            };
+            pBot.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+            pBot.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            pBot.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 130));
 
+            var lnkSite = new LinkLabel
+            {
+                Text = "baidurovlabs.ru",
+                LinkColor = Color.FromArgb(88, 166, 255),
+                ActiveLinkColor = Color.FromArgb(165, 214, 255),
+                VisitedLinkColor = Color.FromArgb(88, 166, 255),
+                Font = new Font("Segoe UI", 9.5f, FontStyle.Bold),
+                AutoSize = true,
+                Anchor = AnchorStyles.Left,
+                Margin = new Padding(0, 6, 20, 0)
+            };
+            lnkSite.LinkClicked += (s, e) => { try { Process.Start(new ProcessStartInfo("https://baidurovlabs.ru") { UseShellExecute = true }); } catch { } };
+
+            var lnkGit = new LinkLabel
+            {
+                Text = "GitHub: github.com/AnT1pal/NWD2DWG",
+                LinkColor = Color.FromArgb(88, 166, 255),
+                ActiveLinkColor = Color.FromArgb(165, 214, 255),
+                VisitedLinkColor = Color.FromArgb(88, 166, 255),
+                Font = new Font("Segoe UI", 9f),
+                AutoSize = true,
+                Anchor = AnchorStyles.Left,
+                Margin = new Padding(0, 6, 0, 0)
+            };
+            lnkGit.LinkClicked += (s, e) => { try { Process.Start(new ProcessStartInfo("https://github.com/AnT1pal/NWD2DWG") { UseShellExecute = true }); } catch { } };
+
+            var btnClose = StyleButton(new Button { Text = "Закрыть", Width = 110, Height = 34, DialogResult = DialogResult.OK, TabStop = true }, true);
+            btnClose.Anchor = AnchorStyles.Right;
+
+            pBot.Controls.Add(lnkSite, 0, 0);
+            pBot.Controls.Add(lnkGit, 1, 0);
+            pBot.Controls.Add(btnClose, 2, 0);
+
+            pRoot.Controls.Add(pTop, 0, 0);
+            pRoot.Controls.Add(pBorder, 0, 1);
+            pRoot.Controls.Add(pBot, 0, 2);
+
+            dlg.Controls.Add(pRoot);
+            dlg.AcceptButton = btnClose;
+            dlg.Shown += (s, e) => { btnClose.Focus(); tbAbout.SelectionLength = 0; };
+            return dlg;
+        }
+
+        void ShowAbout()
+        {
+            using (var dlg = CreateAboutForm())
+            {
+                dlg.StartPosition = FormStartPosition.CenterParent;
                 dlg.ShowDialog(this);
             }
         }
@@ -3483,33 +3788,6 @@ namespace NWD2DWG
             rb.FlatStyle = FlatStyle.Standard;
             rb.Cursor = Cursors.Hand;
             return rb;
-        }
-
-        void ShowAbout()
-        {
-            string msg = "NWD2DWG v2.0\n" +
-                         "Универсальный BIM-конвертер геометрии Navisworks (.NWD/.NWC/.NWF)\n" +
-                         "в форматы AutoCAD (.DWG/.DXF), glTF/GLB (Web/VR) и IFC 2x3 (BIM)\n\n" +
-                         "Новые возможности v2.0:\n" +
-                         "• Mesh Decimation (QEM) — упрощение геометрии 0-90%\n" +
-                         "• Solid Reconstructor — автоматическое распознавание тел\n" +
-                         "• BIM Attribute Transfer (XData) — перенос свойств элементов\n" +
-                         "• Export by Selection Sets — фильтрация по выборкам\n" +
-                         "• glTF / GLB Export — экспорт для Web, VR, Blender\n" +
-                         "• IFC 2x3 Export — координационные BIM-модели\n" +
-                         "• Section Box Crop — обрезка области видимости\n" +
-                         "• PBR Materials & Transparency — перенос прозрачности и цветов\n" +
-                         "• BIM Watchdog — автоматический фоновый конвертер папок\n" +
-                         "• Multi-threaded Engine — многопоточная обработка\n\n" +
-                         "Разработчик: BaidurovLabs\n" +
-                         "Сайт: https://baidurovlabs.ru\n\n" +
-                         "Лицензия: GNU General Public License v3.0 (GPLv3)\n" +
-                         "Свободное программное обеспечение.\n\n" +
-                         "Совместимость:\n" +
-                         "• Navisworks: 2020 – 2026 (Manage / Simulate)\n" +
-                         "• AutoCAD: 2018 – 2026 (Native DWG / DXF R12 / 3DFACE)\n";
-
-            MessageBox.Show(this, msg, "О программе NWD2DWG", MessageBoxButtons.OK, MessageBoxIcon.Information);
         }
 
         void AppendLog(string line)
