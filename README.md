@@ -1,16 +1,19 @@
-# ⚡ NWD2DWG v3.0
+# ⚡ NWD2DWG v3.0 — Engineering & BIM Edition
 
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/Platform-Windows%20x64-0078D6.svg)](https://microsoft.com)
 [![Navisworks](https://img.shields.io/badge/Navisworks-2020%20--%202026-0696D7.svg)](https://autodesk.com)
 [![AutoCAD](https://img.shields.io/badge/AutoCAD-2018%20--%202026-E51B24.svg)](https://autodesk.com)
+[![Open Source](https://img.shields.io/badge/Open%20Source-Free%20for%20Engineers-10b981.svg)](https://github.com/AnT1pal/NWD2DWG)
 [![glTF 2.0](https://img.shields.io/badge/Format-glTF%20%2F%20GLB-green.svg)](https://www.khronos.org/gltf/)
 [![IFC 2x3](https://img.shields.io/badge/Format-IFC%202x3-orange.svg)](https://technical.buildingsmart.org/)
-[![Developer](https://img.shields.io/badge/Developer-BaidurovLabs-00A2FF.svg)](https://baidurovlabs.ru)
+
+> **Свободный и бесплатный инструмент для инженеров, проектировщиков и BIM-сообщества России. Слава Open Source!**  
+> Полная технологическая независимость: 100% локальная работа без облаков, подписок и закрытых форматов.
 
 **NWD2DWG** — универсальный высокопроизводительный BIM-конвертер геометрии из моделей **Autodesk Navisworks (.NWD, .NWC, .NWF)** в форматы **AutoCAD (.DWG, .DXF)**, **glTF / GLB (Web, VR, Blender)** и **IFC 2x3 (BIM-координация)**.
 
-Программа решает ключевую проблему инженеров и BIM-координаторов: Navisworks по умолчанию не позволяет выгружать реальную 3D-геометрию и атрибутику в открытые CAD/BIM форматы для дальнейшей работы в AutoCAD, NanoCAD, Revit, Blender, игровых движках или веб-вьюверах.
+Программа решает фундаментальную боль инженеров и BIM-координаторов: закрытый формат Navisworks по умолчанию блокирует выгрузку 3D-геометрии и атрибутики. **NWD2DWG** возвращает геометрию проектировщикам в открытых и редактируемых форматах, заменяя 6 дорогостоящих зарубежных плагинов и экономя миллионы рублей проектным бюро.
 
 ---
 
