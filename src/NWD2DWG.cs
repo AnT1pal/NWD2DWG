@@ -1361,7 +1361,73 @@ namespace NWD2DWG
                 try { if (nw != null) { object r; TryCallMethod(nw, "CloseFile", out r); } } catch { }
                 try { if (nw != null) nw.Dispose(); } catch { }
                 try { if (manualRoamer != null && !manualRoamer.HasExited) manualRoamer.Kill(); } catch { }
+                try { TempCleaner.CleanTempFiles(0); } catch { }
                 Log.Flush();
+            }
+        }
+
+        // --------------------------------------------------------------------
+        // Автоматическая очистка временных файлов (%TEMP%\NWD2DWG)
+        // --------------------------------------------------------------------
+        public static class TempCleaner
+        {
+            public static long CleanTempFiles(int maxAgeHours = 1)
+            {
+                long freedBytes = 0;
+                string tempDir = Path.Combine(Path.GetTempPath(), "NWD2DWG");
+                if (!Directory.Exists(tempDir)) return 0;
+
+                try
+                {
+                    var dir = new DirectoryInfo(tempDir);
+                    DateTime threshold = DateTime.Now.AddHours(-maxAgeHours);
+
+                    foreach (var file in dir.GetFiles())
+                    {
+                        // Не удаляем текущий используемый DLL плагин
+                        if (file.Name.Equals("NWD2DWG.Plugin.dll", StringComparison.OrdinalIgnoreCase))
+                            continue;
+
+                        bool shouldDelete = false;
+                        if (maxAgeHours <= 0)
+                        {
+                            // При полной очистке удаляем любые временные артефакты
+                            shouldDelete = true;
+                        }
+                        else
+                        {
+                            string ext = file.Extension.ToLowerInvariant();
+                            // Временные тяжелые DXF/DWG/SCR удаляем если старше 1 часа
+                            if (ext == ".dxf" || ext == ".dwg" || ext == ".scr" || ext == ".tmp")
+                            {
+                                if (file.LastWriteTime < threshold) shouldDelete = true;
+                            }
+                            else if (file.LastWriteTime < DateTime.Now.AddDays(-3))
+                            {
+                                // Старые логи старше 3 дней
+                                shouldDelete = true;
+                            }
+                        }
+
+                        if (shouldDelete)
+                        {
+                            try
+                            {
+                                long len = file.Length;
+                                file.Delete();
+                                freedBytes += len;
+                            }
+                            catch { }
+                        }
+                    }
+                }
+                catch { }
+
+                if (freedBytes > 0)
+                {
+                    Log.Write(string.Format(CultureInfo.InvariantCulture, "TempCleaner: очищено {0:F1} МБ временных файлов", freedBytes / 1048576.0));
+                }
+                return freedBytes;
             }
         }
 
@@ -2260,6 +2326,12 @@ namespace NWD2DWG
                     }
                     return 0;
                 }
+                if (cmd == "--clean-temp")
+                {
+                    long freed = NavisConverter.TempCleaner.CleanTempFiles(0);
+                    Console.WriteLine(string.Format("Очищено {0:F1} МБ во временной папке.", freed / 1048576.0));
+                    return 0;
+                }
                 if (cmd == "--convert" || cmd == "--probe" || cmd == "--watch" || cmd == "--screenshot")
                 {
                     try { return Cli(cmd, args); }
@@ -2272,6 +2344,8 @@ namespace NWD2DWG
                     }
                 }
             }
+
+            try { NavisConverter.TempCleaner.CleanTempFiles(12); } catch { }
 
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
