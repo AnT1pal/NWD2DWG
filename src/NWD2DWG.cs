@@ -1,4 +1,4 @@
-// ============================================================================
+﻿// ============================================================================
 //  NWD2DWG — конвертер Navisworks (.nwd/.nwc/.nwf) -> AutoCAD (.dxf/.dwg)
 //  v1.0
 //
@@ -73,6 +73,22 @@ namespace NWD2DWG
         public bool ExportBcf = false;         // экспорт коллизий в BCF 2.1 (.bcfzip)
         public bool Anonymize = false;         // очистка конфиденциальных атрибутов
         public double TileSize = 0.0;          // 0 = нет нарезки, иначе размер куба (мм)
+
+        // === v3.1 – v3.4 (Полный стек экспертизы, EPC и 4D) ===
+        public bool ClusterClashes = false;    // кластеризация коллизий DBSCAN 3D
+        public bool SectionPlan = false;       // генерация 2D поэтажных планов / Z-срез
+        public bool PurgeDxf = false;          // глубокая бинарная чистка DXF от мусора
+        public bool BuildPenetrations = false; // авторасстановка гильз и проемов (DN+50)
+        public bool ValidateClearance = false; // проверка высоты проходов (СП 118.13330)
+        public bool MatchSteel = false;        // сортамент стали ГОСТ (КМ/КМД)
+        public bool CalcCog = false;           // расчет центра масс блока (CoG Гаусс)
+        public bool GenerateIso = false;       // изометрические монтажные схемы ГОСТ 2.317
+        public bool MapSchedule4D = false;     // 4D календарное планирование XML/CSV
+        public bool Shrinkwrap = false;        // защита IP и OBB-оболочки оборудования
+        public bool RoomFinish = false;        // ведомость отделки помещений ГОСТ 21.501
+        public string ScheduleFile = "";        // файл графика для 4D (--schedule)
+        public AdvancedConfig AdvConfig = AdvancedConfig.Load(); // допуски расчёта
+        public OutputProfile OutProfile = OutputProfile.Load();  // куда и как писать результат
     }
 
     // ------------------------------------------------------------------------
@@ -458,6 +474,7 @@ namespace NWD2DWG
         public int TriCount;
         public int SkippedDegenerate;
         public int VertexReadErrors;
+        public int HashCollisions;
 
         public void Reset(double[] m)
         {
@@ -468,6 +485,7 @@ namespace NWD2DWG
             TriCount = 0;
             SkippedDegenerate = 0;
             VertexReadErrors = 0;
+            HashCollisions = 0;
         }
 
         // вызывается из динамически созданной реализации InwSimplePrimitivesCB
@@ -539,11 +557,33 @@ namespace NWD2DWG
 
         int AddVertex(double x, double y, double z)
         {
+            // -0.0 и +0.0 равны, но имеют разные битовые образы: нормализуем,
+            // иначе ноль порождает вершины-дубли
+            if (x == 0.0) x = 0.0;
+            if (y == 0.0) y = 0.0;
+            if (z == 0.0) z = 0.0;
+
             ulong k = Key(x, y, z);
             int idx;
-            if (_index.TryGetValue(k, out idx)) return idx;
+            // Ключ — 64-битный хеш, поэтому при попадании обязаны сверить сами
+            // координаты: иначе коллизия молча сварит две далёкие вершины в одну
+            // и в модели появится шип. При расхождении — линейное пробирование.
+            for (int probe = 0; probe < 8; probe++)
+            {
+                if (!_index.TryGetValue(k, out idx))
+                {
+                    idx = Verts.Count / 3;
+                    _index[k] = idx;
+                    Verts.Add(x); Verts.Add(y); Verts.Add(z);
+                    return idx;
+                }
+                int b = idx * 3;
+                if (Verts[b] == x && Verts[b + 1] == y && Verts[b + 2] == z) return idx;
+                HashCollisions++;
+                unchecked { k += 0x9E3779B97F4A7C15UL; }
+            }
+            // 8 коллизий подряд — практически невозможно; добавляем без склейки
             idx = Verts.Count / 3;
-            _index[k] = idx;
             Verts.Add(x); Verts.Add(y); Verts.Add(z);
             return idx;
         }
@@ -654,8 +694,9 @@ namespace NWD2DWG
         readonly int _units;
         long _entities;
 
+        // Лимит DXF PolyfaceMesh — 32767 и на вершины, и на грани
         const int MaxVerts = 30000;
-        const int MaxFaces = 60000;
+        const int MaxFaces = 30000;
 
         public long Entities { get { return _entities; } }
 
@@ -755,18 +796,25 @@ namespace NWD2DWG
                 var rev = new List<int>();
                 var faces = new List<int>();
                 int f = f0;
-                int vcount = 0;
+                var addedNow = new List<int>(4);
                 while (f < quads.Count)
                 {
-                    if (faces.Count >= MaxFaces) break;
-                    int before = used.Count;
+                    if (faces.Count / 4 >= MaxFaces) break;
                     int a = quads[f], b = quads[f + 1], c = quads[f + 2], d = quads[f + 3];
+                    addedNow.Clear();
                     foreach (int vi in new[] { a, b, c, d })
                     {
-                        if (!used.ContainsKey(vi)) { used[vi] = vcount + used.Count; }
+                        if (!used.ContainsKey(vi)) { used[vi] = used.Count; addedNow.Add(vi); }
                     }
-                    int newCount = used.Count;
-                    if (newCount > MaxVerts) { foreach (int vi in new[] { a, b, c, d }) used.Remove(vi); break; }
+                    if (used.Count > MaxVerts)
+                    {
+                        // Откатываем ТОЛЬКО вершины, добавленные этой гранью.
+                        // Удаление всех четырёх выбивало из словаря вершины,
+                        // уже использованные предыдущими гранями чанка, и рвало
+                        // соответствие между rev[] и 1-based индексами в faces[].
+                        foreach (int vi in addedNow) used.Remove(vi);
+                        break;
+                    }
                     // лица: индексы 1-based
                     faces.Add(used[a] + 1); faces.Add(used[b] + 1); faces.Add(used[c] + 1); faces.Add(used[d] + 1);
                     f += 4;
@@ -999,6 +1047,8 @@ namespace NWD2DWG
 
                 string scrContent = string.Format(CultureInfo.InvariantCulture,
                     "_.SAVEAS\r\n2018\r\n\"{0}\"\r\n_.QUIT\r\n_Y\r\n", normDwg);
+                // Encoding.Default (ANSI-кодовая страница системы) — accoreconsole
+                // читает скрипт именно в ней; ASCII убил бы кириллицу в пути
                 File.WriteAllText(scrPath, scrContent, Encoding.Default);
 
                 if (File.Exists(dwgPath)) try { File.Delete(dwgPath); } catch { }
@@ -1014,11 +1064,22 @@ namespace NWD2DWG
 
                 using (var p = Process.Start(psi))
                 {
-                    p.WaitForExit(300000); // 5 min timeout
+                    if (!p.WaitForExit(600000))
+                    {
+                        // раньше зависший accoreconsole просто оставался жить
+                        try { p.Kill(); } catch { }
+                        try { p.WaitForExit(5000); } catch { }
+                        Log.Write("accoreconsole не завершился за 10 мин — процесс снят");
+                    }
+                    else if (p.ExitCode != 0)
+                    {
+                        Log.Write("accoreconsole завершился с кодом " + p.ExitCode);
+                    }
                 }
 
                 try { File.Delete(scrPath); } catch { }
                 if (File.Exists(dwgPath) && new FileInfo(dwgPath).Length > 0) return;
+                Log.Write("accoreconsole не создал DWG, пробуем COM-автоматизацию AutoCAD");
             }
 
             // Fallback: COM-автоматизация
@@ -1038,11 +1099,28 @@ namespace NWD2DWG
 
                 string scrContent = string.Format(CultureInfo.InvariantCulture,
                     "_.SAVEAS\r\n2018\r\n\"{0}\"\r\n", normDwg);
-                File.WriteAllText(scrPath, scrContent, Encoding.ASCII);
+                // ASCII портил кириллицу в пути (например "Новая папка") — нужна ANSI
+                File.WriteAllText(scrPath, scrContent, Encoding.Default);
 
                 dynamic doc = acad.Documents.Add();
                 doc.SendCommand(string.Format(CultureInfo.InvariantCulture, "_.SCRIPT \"{0}\"\r\n", scrPath.Replace('\\', '/')));
-                Thread.Sleep(3000);
+
+                // SendCommand асинхронна: фиксированные 3 с не хватало на больших
+                // файлах — ждём появления DWG и стабилизации его размера
+                var swWait = Stopwatch.StartNew();
+                long lastLen = -1;
+                int stable = 0;
+                while (swWait.Elapsed.TotalSeconds < 600)
+                {
+                    Thread.Sleep(500);
+                    long len = -1;
+                    try { if (File.Exists(dwgPath)) len = new FileInfo(dwgPath).Length; } catch { }
+                    if (len > 0 && len == lastLen) { if (++stable >= 4) break; }
+                    else stable = 0;
+                    lastLen = len;
+                }
+                if (lastLen <= 0) Log.Write("AutoCAD (COM) не создал DWG за отведённое время: " + dwgPath);
+
                 try { File.Delete(scrPath); } catch { }
                 doc.Close(false);
             }
@@ -1082,8 +1160,9 @@ namespace NWD2DWG
                         delegate(IList<double> verts, IList<int> quads, string layer, int rgb)
                         {
                             // разбивка на куски (лимиты AutoCAD на полилинии)
-                            const int maxV = 30000, maxF = 60000;
+                            const int maxV = 30000, maxF = 30000;
                             int f0 = 0;
+                            var addedNow = new List<int>(4);
                             while (f0 < quads.Count)
                             {
                                 var used = new Dictionary<int, int>();
@@ -1092,13 +1171,15 @@ namespace NWD2DWG
                                 int f = f0;
                                 while (f < quads.Count)
                                 {
-                                    if (faces.Count >= maxF) break;
+                                    if (faces.Count / 4 >= maxF) break;
                                     int a = quads[f], b = quads[f + 1], c = quads[f + 2], d = quads[f + 3];
+                                    addedNow.Clear();
                                     foreach (int vi in new[] { a, b, c, d })
                                     {
-                                        if (!used.ContainsKey(vi)) used[vi] = used.Count;
+                                        if (!used.ContainsKey(vi)) { used[vi] = used.Count; addedNow.Add(vi); }
                                     }
-                                    if (used.Count > maxV) { foreach (int vi in new[] { a, b, c, d }) used.Remove(vi); break; }
+                                    // откат только собственных вершин грани (см. DxfWriter.AddPolyface)
+                                    if (used.Count > maxV) { foreach (int vi in addedNow) used.Remove(vi); break; }
                                     faces.Add(used[a] + 1); faces.Add(used[b] + 1); faces.Add(used[c] + 1); faces.Add(used[d] + 1);
                                     f += 4;
                                 }
@@ -1193,6 +1274,280 @@ namespace NWD2DWG
             throw new Exception("Не найден файл плагина NWD2DWG.Plugin.dll. Поместите NWD2DWG.Plugin.dll рядом с программой.");
         }
 
+        // Список DXF, реально созданных плагином (один файл или набор разделов)
+        /// <summary>
+        /// Показывает, что происходит во время конвертации: строки журнала
+        /// плагина по мере появления плюс собственная сводка — сколько прошло
+        /// времени, насколько вырос файл, с какой скоростью, сколько осталось
+        /// места на диске.
+        ///
+        /// Здесь же стоит предохранитель. Один прогон вырастил файл до 15.7 ГБ
+        /// и был замечен случайно: ни размера, ни свободного места никто не
+        /// показывал. Теперь при опасном росте работа останавливается сама.
+        /// </summary>
+        class ConvWatcher
+        {
+            const long GB = 1024L * 1024 * 1024;
+
+            // Пороги предупреждений и аварийной остановки.
+            static readonly long[] WarnAt = { 2 * GB, 5 * GB, 10 * GB, 20 * GB };
+            const long MinFreeBytes = 3 * GB;       // не за счёт последнего места
+
+            // Порог остановки. По умолчанию 20 ГБ — дальше это заведомо не
+            // выдача, а разросшаяся тесселяция. Переопределяется переменной
+            // окружения: на проверках и на слабых машинах нужен свой предел.
+            static readonly long AbortAtBytes = ReadLimitGb() * GB;
+
+            static long ReadLimitGb()
+            {
+                try
+                {
+                    string v = Environment.GetEnvironmentVariable("NWD2DWG_MAX_OUTPUT_GB");
+                    long gb;
+                    if (!string.IsNullOrEmpty(v) && long.TryParse(v, out gb) && gb > 0) return gb;
+                }
+                catch { }
+                return 20;
+            }
+
+            readonly string _log, _target, _runDir;
+            readonly Action<string> _status;
+            Thread _th;
+            volatile bool _stop;
+            long _pos;
+            int _warned;
+            bool _aborted;
+            readonly DateTime _t0 = DateTime.Now;
+            long _lastSize;
+            DateTime _lastTick = DateTime.Now;
+
+            public ConvWatcher(string logPath, string target, string runDir, Action<string> status)
+            {
+                _log = logPath; _target = target; _runDir = runDir; _status = status;
+            }
+
+            // Наблюдатель работает в фоновом потоке, пока главный поток STA
+            // сидит внутри вызова COM в Navisworks. Обращаться отсюда к общему
+            // журналу и к делегату состояния оказалось нельзя: процесс
+            // Navisworks падал через десяток секунд. Поэтому пишем только в
+            // консоль, и то под замком.
+            static readonly object ConsoleLock = new object();
+
+            void Say(string s)
+            {
+                lock (ConsoleLock)
+                {
+                    try { Console.Out.WriteLine(s); Console.Out.Flush(); } catch { }
+                }
+            }
+
+            public void Start()
+            {
+                _th = new Thread(Loop) { IsBackground = true, Name = "conv-watch" };
+                _th.Start();
+            }
+
+            public void Stop()
+            {
+                _stop = true;
+                if (_th != null) { try { _th.Join(2500); } catch { } }
+                Pump();   // добираем хвост журнала
+            }
+
+            void Loop()
+            {
+                var lastReport = DateTime.Now;
+                while (!_stop)
+                {
+                    try
+                    {
+                        Pump();
+                        if ((DateTime.Now - lastReport).TotalSeconds >= 15)
+                        {
+                            lastReport = DateTime.Now;
+                            Report();
+                        }
+                    }
+                    catch { }
+                    Thread.Sleep(1000);
+                }
+            }
+
+            /// <summary>Новые строки журнала плагина — наружу без задержки.</summary>
+            void Pump()
+            {
+                try
+                {
+                    if (!File.Exists(_log)) return;
+                    using (var fs = new FileStream(_log, FileMode.Open, FileAccess.Read,
+                                                   FileShare.ReadWrite | FileShare.Delete))
+                    {
+                        if (fs.Length < _pos) _pos = 0;      // журнал пересоздан
+                        if (fs.Length == _pos) return;
+                        fs.Seek(_pos, SeekOrigin.Begin);
+                        using (var sr = new StreamReader(fs, Encoding.UTF8))
+                        {
+                            string line;
+                            while ((line = sr.ReadLine()) != null)
+                            {
+                                line = line.TrimEnd();
+                                if (line.Length > 0) Say("  · " + line);
+                            }
+                            _pos = fs.Position;
+                        }
+                    }
+                }
+                catch { }
+            }
+
+            /// <summary>Сводка: время, объём, скорость, свободное место.</summary>
+            void Report()
+            {
+                long size = 0;
+                try { if (File.Exists(_target)) size = new FileInfo(_target).Length; }
+                catch { }
+
+                var now = DateTime.Now;
+                double secs = (now - _lastTick).TotalSeconds;
+                double mbPerSec = secs > 0.5 ? (size - _lastSize) / 1048576.0 / secs : 0;
+                _lastTick = now; _lastSize = size;
+
+                long free = FreeSpace();
+                var sb = new StringBuilder();
+                sb.AppendFormat(CultureInfo.InvariantCulture, @"[ход работы] {0:hh\:mm\:ss}",
+                                now - _t0);
+                if (size > 0)
+                    sb.AppendFormat(CultureInfo.InvariantCulture, " | файл {0:F2} ГБ (+{1:F1} МБ/с)",
+                                    size / (double)GB, mbPerSec);
+                if (free > 0)
+                    sb.AppendFormat(CultureInfo.InvariantCulture, " | свободно {0:F1} ГБ",
+                                    free / (double)GB);
+                Say(sb.ToString());
+
+                for (int i = _warned; i < WarnAt.Length; i++)
+                {
+                    if (size < WarnAt[i]) break;
+                    _warned = i + 1;
+                    Say(string.Format(CultureInfo.InvariantCulture,
+                        "ВНИМАНИЕ: выходной файл перевалил за {0} ГБ. Если геометрия не нужна, " +
+                        "снимите «Писать основную геометрию» либо примените упрощение сетки.",
+                        WarnAt[i] / GB));
+                }
+
+                if (_aborted) return;   // сообщение об остановке — один раз
+                if (size >= AbortAtBytes || (free > 0 && free < MinFreeBytes))
+                {
+                    _aborted = true;
+                    Say(size >= AbortAtBytes
+                        ? "ОСТАНОВКА: выходной файл превысил разумный предел — работа прекращается."
+                        : "ОСТАНОВКА: на диске почти не осталось места — работа прекращается.");
+                    try { File.WriteAllText(Path.Combine(_runDir, "stop.flag"), "1"); }
+                    catch { }
+                }
+            }
+
+            long FreeSpace()
+            {
+                try
+                {
+                    string root = Path.GetPathRoot(Path.GetFullPath(_target));
+                    if (string.IsNullOrEmpty(root)) return 0;
+                    return new DriveInfo(root).AvailableFreeSpace;
+                }
+                catch { return 0; }
+            }
+        }
+
+        /// <summary>
+        /// Ждёт, пока предыдущий Navisworks закроется.
+        ///
+        /// Замеры показали: подъём срывается тогда, когда прошлый экземпляр ещё
+        /// не отпустил автоматизацию. Процесса в списке может уже не быть, но
+        /// выгрузка занимает секунды, и запуск, поданный сразу следом, получает
+        /// обрыв связи. Из шести прогонов подряд так падала половина.
+        ///
+        /// Ждём ограниченно: если пользователь держит Navisworks открытым
+        /// сам, ждать его вечно нельзя — пробуем работать как есть.
+        /// </summary>
+        static void WaitForNavisworksIdle(Action<string> status)
+        {
+            const int MaxWaitSec = 45;
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            bool told = false;
+
+            while (sw.Elapsed.TotalSeconds < MaxWaitSec)
+            {
+                int alive;
+                try { alive = Process.GetProcessesByName("Roamer").Length; }
+                catch { return; }
+
+                if (alive == 0)
+                {
+                    // Выдержка после исчезновения процесса. Полутора секунд
+                    // оказалось мало: обрыв возвращался и после ожидания.
+                    // Процесс из списка уходит раньше, чем освобождается COM.
+                    if (sw.Elapsed.TotalSeconds > 0.5) Thread.Sleep(6000);
+                    return;
+                }
+
+                if (!told)
+                {
+                    told = true;
+                    string m = "Ожидание освобождения Navisworks (запущено экземпляров: " + alive + ")";
+                    Log.Write(m);
+                    if (status != null) { try { status(m); } catch { } }
+                }
+                Thread.Sleep(1000);
+            }
+
+            Log.Write("Navisworks всё ещё запущен — продолжаем, не дожидаясь.");
+        }
+
+        /// <summary>Обрыв связи с Navisworks (RPC_S_CALL_FAILED), а не ошибка расчёта.</summary>
+        static bool IsRpcBreak(Exception ex)
+        {
+            // Обрыв приходит не одним кодом, а целым семейством: сервер
+            // недоступен, вызов не прошёл, соединение разорвано, не удалось
+            // запустить сервер. Ловить только один из них бессмысленно — на
+            // измерениях встретились и 0x800706BE, и 0x800706BA.
+            int[] rpcCodes =
+            {
+                unchecked((int)0x800706BA),   // RPC-сервер недоступен
+                unchecked((int)0x800706BE),   // вызов не прошёл
+                unchecked((int)0x800706BF),   // вызов не прошёл и не выполнен
+                unchecked((int)0x800706B5),   // неизвестный интерфейс
+                unchecked((int)0x80010108),   // объект отсоединён от клиента
+                unchecked((int)0x80080005),   // не удалось запустить сервер
+            };
+
+            for (Exception e = ex; e != null; e = e.InnerException)
+            {
+                int hr = 0;
+                try { hr = System.Runtime.InteropServices.Marshal.GetHRForException(e); }
+                catch { }
+                for (int i = 0; i < rpcCodes.Length; i++)
+                    if (hr == rpcCodes[i]) return true;
+
+                if (e.Message == null) continue;
+                for (int i = 0; i < rpcCodes.Length; i++)
+                    if (e.Message.IndexOf(rpcCodes[i].ToString(CultureInfo.InvariantCulture),
+                                          StringComparison.Ordinal) >= 0) return true;
+            }
+            return false;
+        }
+
+        static IEnumerable<string> CollectProducedDxf(AppOptions opts, string targetDxf)
+        {
+            if (!opts.SplitDisciplines)
+            {
+                if (File.Exists(targetDxf)) yield return targetDxf;
+                yield break;
+            }
+            string dir = Path.GetDirectoryName(targetDxf) ?? ".";
+            string bas = Path.GetFileNameWithoutExtension(targetDxf);
+            foreach (string f in Directory.GetFiles(dir, bas + "_*.dxf")) yield return f;
+        }
+
         public static ConvertStats ConvertFile(AppOptions opts, string input, string outPath,
                                                Action<string> status, Action<double> progress,
                                                Func<bool> cancelled)
@@ -1214,28 +1569,86 @@ namespace NWD2DWG
             dynamic nw = null;
             Process manualRoamer = null;
 
+            // Своя папка на каждый прогон: раньше промежуточные файлы лежали в
+            // общей %TEMP%\NWD2DWG, а finally звал CleanTempFiles(0), который сносил
+            // ВСЁ — включая файлы параллельно идущей конвертации.
+            string runDir = Path.Combine(Path.GetTempPath(), "NWD2DWG",
+                                         "run_" + Guid.NewGuid().ToString("N").Substring(0, 12));
+            try { Directory.CreateDirectory(runDir); } catch { }
+
             string targetDxf = outPath;
             bool isDwg = opts.Format == OutFormat.Dwg;
             if (isDwg)
-            {
-                string tempDir = Path.Combine(Path.GetTempPath(), "NWD2DWG");
-                if (!Directory.Exists(tempDir)) Directory.CreateDirectory(tempDir);
-                targetDxf = Path.Combine(tempDir, Path.GetFileNameWithoutExtension(outPath) + "_" + Guid.NewGuid().ToString("N").Substring(0, 8) + ".dxf");
-            }
+                targetDxf = Path.Combine(runDir, Path.GetFileNameWithoutExtension(outPath) + ".dxf");
 
-            string convLog = Path.Combine(Path.GetTempPath(), "NWD2DWG", "conv_" + DateTime.Now.ToString("yyyyMMdd_HHmmss") + ".log");
+            string convLog = Path.Combine(runDir, "conv.log");
+            bool keepRunDir = false;
 
             try
             {
                 // ---- открыть Navisworks ----
-                Log.Write("запуск Navisworks (папка: " + nwDir + ")");
-                nw = CreateNavisworksInstance(loader, nwDir, opts.ShowNavisworks, out manualRoamer);
+                //
+                // Обрыв связи случается и здесь, на подъёме автоматизации, а не
+                // только при вызове плагина. Причём приходит он тогда обычным
+                // InvalidOperationException, без обёртки TargetInvocationException:
+                // обращения к объекту автоматизации идут напрямую, а не через
+                // рефлексию. Из-за этого повтор, поставленный только вокруг
+                // вызова плагина, такие обрывы пропускал — три прогона подряд
+                // упали, не сделав ни одной попытки.
+                //
+                // Поэтому подъём Navisworks и загрузка плагина повторяются
+                // здесь, целиком: неудачный экземпляр закрывается, и следующая
+                // попытка начинается с чистого места.
+                const int MaxStartAttempts = 4;
+                MethodInfo mAdd = null;
 
-                // Загружаем плагин в процесс Navisworks
-                Log.Write("загрузка плагина в Navisworks...");
-                MethodInfo mAdd = loader.AutomationType.GetMethod("AddPluginAssembly");
-                if (mAdd == null) throw new Exception("AddPluginAssembly не найден в NavisworksApplication");
-                mAdd.Invoke(nw, new object[] { pluginDll });
+                for (int attempt = 1; ; attempt++)
+                {
+                    try
+                    {
+                        WaitForNavisworksIdle(status);
+                        Log.Write("запуск Navisworks (папка: " + nwDir + ")");
+                        nw = CreateNavisworksInstance(loader, nwDir, opts.ShowNavisworks, out manualRoamer);
+
+                        // Загружаем плагин в процесс Navisworks
+                        Log.Write("загрузка плагина в Navisworks...");
+                        mAdd = loader.AutomationType.GetMethod("AddPluginAssembly");
+                        if (mAdd == null) throw new Exception("AddPluginAssembly не найден в NavisworksApplication");
+                        mAdd.Invoke(nw, new object[] { pluginDll });
+                        break;
+                    }
+                    catch (TargetInvocationException tie) when (!IsRpcBreak(tie))
+                    {
+                        // Без разворачивания наружу уходило бесполезное
+                        // «Адресат вызова создал исключение» — по нему нельзя
+                        // понять ровно ничего, а разбирать потом приходится
+                        // по журналам.
+                        Exception inner = tie.InnerException ?? tie;
+                        Log.Write("ОШИБКА при подъёме Navisworks: " + inner);
+                        keepRunDir = true;
+                        throw new Exception("Navisworks: " + inner.Message +
+                                            " (лог прогона: " + runDir + ")", inner);
+                    }
+                    catch (Exception ex) when (IsRpcBreak(ex) && attempt < MaxStartAttempts)
+                    {
+                        int wait = attempt * 5;
+                        string msg = string.Format(CultureInfo.InvariantCulture,
+                            "Navisworks не поднялся — попытка {0} из {1}, повтор через {2} с",
+                            attempt, MaxStartAttempts, wait);
+                        Log.Write(msg);
+                        if (status != null) { try { status(msg); } catch { } }
+
+                        // Обрывок предыдущей попытки надо убрать, иначе он
+                        // держит автоматизацию и мешает следующей.
+                        try { if (nw != null) nw.Dispose(); } catch { }
+                        nw = null;
+                        try { if (manualRoamer != null && !manualRoamer.HasExited) manualRoamer.Kill(); }
+                        catch { }
+                        manualRoamer = null;
+
+                        Thread.Sleep(wait * 1000);
+                    }
+                }
 
                 if (cancelled != null && cancelled()) throw new OperationCanceledException("отменено пользователем");
 
@@ -1261,6 +1674,16 @@ namespace NWD2DWG
                         d => d.ToString("G12", CultureInfo.InvariantCulture)));
                 }
 
+                var adv = opts.AdvConfig ?? new Plugin.AdvancedConfig();
+                string advPath = Path.Combine(runDir, "modules.json");
+                try { adv.SaveTo(advPath); }
+                catch (Exception cex) { Log.Write("не удалось сохранить параметры модулей: " + cex.Message); advPath = ""; }
+
+                var outp = opts.OutProfile ?? new Plugin.OutputProfile();
+                string outPath2 = Path.Combine(runDir, "output.json");
+                try { outp.SaveTo(outPath2); }
+                catch (Exception oex) { Log.Write("не удалось сохранить профиль выдачи: " + oex.Message); outPath2 = ""; }
+
                 string[] pluginArgs = new string[]
                 {
                     input,
@@ -1285,28 +1708,142 @@ namespace NWD2DWG
                     opts.TracePipes ? "1" : "0",                                   // [17]
                     opts.ExportBoq ? "1" : "0",                                    // [18]
                     opts.ExportBcf ? "1" : "0",                                    // [19]
-                    opts.Anonymize ? "1" : "0"                                     // [20]
+                    opts.Anonymize ? "1" : "0",                                    // [20]
+                    // v3.1–v3.4: раньше эти флаги вообще не доезжали до плагина
+                    opts.ClusterClashes ? "1" : "0",                               // [21]
+                    opts.SectionPlan ? "1" : "0",                                  // [22]
+                    opts.PurgeDxf ? "1" : "0",                                     // [23]
+                    opts.BuildPenetrations ? "1" : "0",                            // [24]
+                    opts.ValidateClearance ? "1" : "0",                            // [25]
+                    opts.MatchSteel ? "1" : "0",                                   // [26]
+                    opts.CalcCog ? "1" : "0",                                      // [27]
+                    opts.GenerateIso ? "1" : "0",                                  // [28]
+                    opts.MapSchedule4D ? "1" : "0",                                // [29]
+                    opts.Shrinkwrap ? "1" : "0",                                   // [30]
+                    opts.RoomFinish ? "1" : "0",                                   // [31]
+                    // Все допуски уходят одним JSON-файлом: позиционный протокол
+                    // на 40+ аргументов был бы нечитаем и ломался при любой правке
+                    advPath,                                                       // [32]
+                    opts.ScheduleFile ?? "",                                       // [33]
+                    outPath2                                                       // [34]
                 };
 
                 if (status != null) status("Извлечение геометрии и полигонов...");
                 if (progress != null) progress(0.2);
 
-                // Вызов плагина в том же потоке (STA)
-                object ret = mExec.Invoke(nw, new object[] { "NWD2DWG_Converter.NWD2DWG", pluginArgs });
+                // Плагин работает в этом же потоке и молчит до самого конца:
+                // его журнал ложился в файл и печатался задним числом. На
+                // тяжёлой модели это выглядело как зависание — двадцать четыре
+                // минуты одной строки, и никакой возможности понять, идёт
+                // работа или всё встало. Наблюдатель читает журнал плагина по
+                // мере появления строк и сам добавляет сводку о ходе.
+                var watch = new ConvWatcher(convLog, targetDxf, runDir, status);
+                // Выключатель для разбора неполадок: позволяет отделить
+                // поведение наблюдателя от поведения самой конвертации.
+                if (Environment.GetEnvironmentVariable("NWD2DWG_NO_WATCH") != "1")
+                    watch.Start();
+
+                // Вызов плагина в том же потоке (STA).
+                //
+                // Navisworks иногда обрывает связь на самом старте: процесс
+                // поднимается и умирает секунд через двадцать, наружу приходит
+                // RPC_S_CALL_FAILED. Замер шести одинаковых прогонов подряд дал
+                // два успеха и четыре обрыва, причём обрывы всегда быстрые
+                // (22-24 с), а удачные прогоны идут минутами. От параметров
+                // запуска частота не зависит — проверено включением и
+                // выключением стороннего наблюдателя за ходом работы.
+                //
+                // Значит это помеха, а не приговор: ждём и пробуем снова.
+                // Повторяем только этот обрыв — настоящую ошибку расчёта
+                // повторять бессмысленно, она воспроизведётся.
+                const int MaxAttempts = 4;
+
+                object ret = null;
+                for (int attempt = 1; ; attempt++)
+                {
+                    try
+                    {
+                        ret = mExec.Invoke(nw, new object[] { "NWD2DWG_Converter.NWD2DWG", pluginArgs });
+                        break;
+                    }
+                    catch (TargetInvocationException tie) when (IsRpcBreak(tie) && attempt < MaxAttempts)
+                    {
+                        int wait = attempt * 5;
+                        string msg = string.Format(CultureInfo.InvariantCulture,
+                            "Navisworks оборвал связь на старте — попытка {0} из {1}, повтор через {2} с",
+                            attempt, MaxAttempts, wait);
+                        Log.Write(msg);
+                        if (status != null) { try { status(msg); } catch { } }
+                        Thread.Sleep(wait * 1000);
+                    }
+                    catch (TargetInvocationException tie)
+                    {
+                        // без разворачивания наружу уходило бесполезное
+                        // "Целевой вызов создал исключение"
+                        watch.Stop();
+                        Exception inner = tie.InnerException ?? tie;
+                        Log.Write("ИСКЛЮЧЕНИЕ В ПЛАГИНЕ: " + inner);
+                        if (File.Exists(convLog))
+                        { try { Log.Write("[Plugin log] " + File.ReadAllText(convLog)); } catch { } }
+                        keepRunDir = true;
+
+                        string what = IsRpcBreak(tie)
+                            ? "Navisworks обрывает связь на старте и не отвечает после " +
+                              MaxAttempts + " попыток. Закройте открытые окна Navisworks " +
+                              "и повторите; если не помогает — запустите Navisworks вручную один раз."
+                            : "Плагин Navisworks: " + inner.Message;
+
+                        throw new Exception(what + " (подробности и лог плагина: " + runDir + ")", inner);
+                    }
+                }
+                watch.Stop();
                 int exitCode = ret != null ? Convert.ToInt32(ret) : 0;
 
                 if (exitCode != 0)
                 {
                     string errDetail = "";
                     if (File.Exists(convLog)) { try { errDetail = File.ReadAllText(convLog); } catch { } }
+                    keepRunDir = true;
                     throw new Exception("Плагин конвертации завершился с кодом " + exitCode + ": " + errDetail);
                 }
 
+                // Когда профиль выдачи запрещает писать геометрию, её отсутствие —
+                // это выполненное указание, а не сбой. Раньше шаблон сметчика
+                // считал ведомости полностью, а прогон всё равно падал в конце.
                 if (!opts.SplitDisciplines && !File.Exists(targetDxf))
-                    throw new Exception("Файл геометрии не был создан плагином.");
+                {
+                    if (opts.OutProfile != null && !opts.OutProfile.EmitGeometry)
+                        Log.Write("Геометрия не писалась по шаблону выдачи — выданы только ведомости и отчёты.");
+                    else
+                        throw new Exception("Файл геометрии не был создан плагином.");
+                }
 
-                // Если формат DWG — конвертируем через AutoCAD
-                if (isDwg)
+                // === Глубокая чистка DXF ===
+                // делаем здесь, а не в плагине: файл к этому моменту закрыт,
+                // а для DWG чистка должна пройти до конвертации через AutoCAD
+                if (opts.PurgeDxf)
+                {
+                    if (status != null) status("Чистка DXF от неиспользуемых слоёв и блоков...");
+                    foreach (string dxfToPurge in CollectProducedDxf(opts, targetDxf))
+                    {
+                        var scope = new Plugin.CadPurger.PurgeScope
+                        {
+                            Layers = adv.PurgeLayers,
+                            Linetypes = adv.PurgeLinetypes,
+                            TextStyles = adv.PurgeTextStyles,
+                            Blocks = adv.PurgeBlocks
+                        };
+                        try { Log.Write(Plugin.CadPurger.Purge(dxfToPurge, null, scope)); }
+                        catch (Exception pex) { Log.Write("CadPurger: ОШИБКА " + pex.Message); }
+                    }
+                }
+
+                // Если формат DWG — конвертируем через AutoCAD.
+                // При запрете на запись геометрии конвертировать нечего:
+                // сочетание бессмысленное, но падать на нём не следует.
+                if (isDwg && opts.OutProfile != null && !opts.OutProfile.EmitGeometry)
+                    Log.Write("Формат DWG выбран, но запись геометрии запрещена шаблоном — конвертация в DWG пропущена.");
+                else if (isDwg)
                 {
                     string finalDestDir = Path.GetDirectoryName(Path.GetFullPath(outPath)) ?? ".";
                     string finalBaseName = Path.GetFileNameWithoutExtension(outPath);
@@ -1375,9 +1912,17 @@ namespace NWD2DWG
             finally
             {
                 try { if (nw != null) { object r; TryCallMethod(nw, "CloseFile", out r); } } catch { }
-                try { if (nw != null) nw.Dispose(); } catch { }
-                try { if (manualRoamer != null && !manualRoamer.HasExited) manualRoamer.Kill(); } catch { }
-                try { TempCleaner.CleanTempFiles(0); } catch { }
+                // Чужое окно, к которому мы подключились, закрывать нельзя:
+                // человек мог оставить его открытым для своей работы.
+                if (NavisConverter.OwnsInstance)
+                {
+                    try { if (nw != null) nw.Dispose(); } catch { }
+                    try { if (manualRoamer != null && !manualRoamer.HasExited) manualRoamer.Kill(); } catch { }
+                }
+                else Log.Write("Navisworks оставлен открытым: подключались к чужому окну");
+                // при падении оставляем папку прогона: там лежит лог плагина
+                if (keepRunDir) Log.Write("Временные файлы прогона сохранены для разбора: " + runDir);
+                else { try { TempCleaner.CleanRun(runDir); } catch { } }
                 Log.Flush();
             }
         }
@@ -1387,6 +1932,24 @@ namespace NWD2DWG
         // --------------------------------------------------------------------
         public static class TempCleaner
         {
+            // Удаляет папку одного прогона конвертации целиком.
+            public static long CleanRun(string runDir)
+            {
+                if (string.IsNullOrEmpty(runDir) || !Directory.Exists(runDir)) return 0;
+                long freed = 0;
+                try
+                {
+                    foreach (var f in new DirectoryInfo(runDir).GetFiles("*", SearchOption.AllDirectories))
+                    { try { freed += f.Length; } catch { } }
+                    Directory.Delete(runDir, true);
+                }
+                catch { }
+                if (freed > 0)
+                    Log.Write(string.Format(CultureInfo.InvariantCulture,
+                        "TempCleaner: удалена папка прогона, освобождено {0:F1} МБ", freed / 1048576.0));
+                return freed;
+            }
+
             public static long CleanTempFiles(int maxAgeHours = 1)
             {
                 long freedBytes = 0;
@@ -1396,6 +1959,20 @@ namespace NWD2DWG
                 try
                 {
                     var dir = new DirectoryInfo(tempDir);
+
+                    // брошенные папки прогонов (аварийное завершение)
+                    DateTime dirThreshold = DateTime.Now.AddHours(-Math.Max(0, maxAgeHours));
+                    foreach (var sub in dir.GetDirectories("run_*"))
+                    {
+                        try
+                        {
+                            if (maxAgeHours > 0 && sub.LastWriteTime >= dirThreshold) continue;
+                            foreach (var f in sub.GetFiles("*", SearchOption.AllDirectories))
+                            { try { freedBytes += f.Length; } catch { } }
+                            sub.Delete(true);
+                        }
+                        catch { }
+                    }
                     DateTime threshold = DateTime.Now.AddHours(-maxAgeHours);
 
                     foreach (var file in dir.GetFiles())
@@ -1453,9 +2030,34 @@ namespace NWD2DWG
         // Стратегия: пробуем создать через Activator — если Roamer не стартовал,
         // запускаем Roamer.exe вручную и подключаемся через TryGetRunningInstance.
         // --------------------------------------------------------------------
+        /// <summary>Подняли ли мы Navisworks сами. Чужое окно закрывать нельзя.</summary>
+        public static bool OwnsInstance;
+
         public static dynamic CreateNavisworksInstance(NwLoader loader, string nwDir, bool visible, out Process manualRoamer)
         {
             manualRoamer = null;
+            OwnsInstance = true;
+
+            // Кто из процессов Navisworks был запущен ДО нас.
+            //
+            // Раньше здесь стояла глобальная проверка «есть ли в системе хоть
+            // какой-нибудь Roamer.exe». Она отвечала на неверный вопрос:
+            // недобитый процесс от предыдущего прогона считался нашим, и
+            // программа возвращала объект автоматизации, ни к чему не
+            // подключённый. Первый же вызов рвался с ошибкой связи — отсюда и
+            // «один прогон проходит, следующий падает», и бесполезность
+            // повторов: они снова видели тот же чужой процесс.
+            //
+            // Правильный вопрос — появился ли НОВЫЙ процесс, наш.
+            var before = new HashSet<int>();
+            try
+            {
+                foreach (var p in Process.GetProcessesByName("Roamer"))
+                { before.Add(p.Id); p.Dispose(); }
+            }
+            catch { }
+            if (before.Count > 0)
+                Log.Write("до запуска уже работало экземпляров Navisworks: " + before.Count);
 
             // 1) Классический путь: Activator.CreateInstance
             Log.Write("попытка 1: Activator.CreateInstance (классический запуск)");
@@ -1465,23 +2067,32 @@ namespace NWD2DWG
             // Даём Navisworks время на старт (в старых версиях конструктор сам запускает Roamer.exe)
             Thread.Sleep(3000);
 
-            // Проверяем, запустился ли Roamer.exe
-            bool roamerRunning = false;
+            // Появился ли процесс, которого до нас не было
+            bool ourRoamerStarted = false;
             try
             {
                 foreach (var p in Process.GetProcessesByName("Roamer"))
-                { roamerRunning = true; p.Dispose(); break; }
+                {
+                    if (!before.Contains(p.Id)) ourRoamerStarted = true;
+                    p.Dispose();
+                    if (ourRoamerStarted) break;
+                }
             }
             catch { }
 
-            if (roamerRunning)
+            // Мало увидеть процесс — объект должен отвечать. Обращение к нему
+            // стоит копейки, а отличает рабочее подключение от пустышки.
+            if (ourRoamerStarted && Responds(nw))
             {
                 Log.Write("Roamer.exe запущен автоматически (режим 2017-2024)");
                 return nw;
             }
 
-            // 2) Navisworks 2025+/2026: Roamer.exe не запустился — запускаем вручную
-            Log.Write("Roamer.exe НЕ запущен — режим 2025+/2026: ручной запуск");
+            if (ourRoamerStarted)
+                Log.Write("процесс появился, но объект автоматизации не отвечает — переходим к ручному запуску");
+            else
+                Log.Write("новый Roamer.exe не появился — режим 2025+/2026: ручной запуск");
+
             try { nw.Dispose(); } catch { }
 
             string roamerPath = Path.Combine(nwDir, "Roamer.exe");
@@ -1497,6 +2108,25 @@ namespace NWD2DWG
             };
             manualRoamer = Process.Start(psi);
             Log.Write("Roamer.exe запущен: PID=" + manualRoamer.Id);
+
+            // Ждём, пока Navisworks закончит подниматься и начнёт ждать ввода.
+            //
+            // Замер показал: подключение через TryGetRunningInstance отвечает
+            // уже через 5 секунд после старта, но приложение к этому моменту
+            // ещё грузит ленту и свои надстройки. Плагин, вызванный на десятой
+            // секунде, ронял процесс. Отсюда и разброс: при тёплом кэше
+            // Navisworks успевал подняться, при холодном — нет.
+            //
+            // WaitForInputIdle отвечает именно на нужный вопрос: закончил ли
+            // процесс инициализацию.
+            try
+            {
+                if (manualRoamer.WaitForInputIdle(90000))
+                    Log.Write("Navisworks завершил инициализацию");
+                else
+                    Log.Write("Navisworks не сообщил о готовности за 90 с — продолжаем осторожно");
+            }
+            catch (Exception ex) { Log.Write("ожидание готовности: " + ex.Message); }
 
             // Ждём инициализации Roamer.exe (до 30 секунд)
             Log.Write("ожидание инициализации Roamer.exe...");
@@ -1544,8 +2174,42 @@ namespace NWD2DWG
                 throw new Exception("Не удалось подключиться к Roamer.exe через TryGetRunningInstance (тайм-аут 30 сек)");
 
             try { result.Visible = visible; } catch { }
-            Thread.Sleep(3000); // Даем Roamer.exe полностью завершить инициализацию
+
+            // Подключение получено — но объект должен ещё и устойчиво отвечать.
+            // Трёх секунд вслепую не хватало: первый же вызов плагина рвал связь.
+            // Спрашиваем несколько раз подряд и только потом отдаём наружу.
+            int steady = 0;
+            for (int i = 0; i < 10 && steady < 2; i++)
+            {
+                Thread.Sleep(500);
+                if (Responds(result)) steady++;
+                else steady = 0;
+            }
+            Log.Write(steady >= 2
+                ? "объект автоматизации отвечает устойчиво"
+                : "объект автоматизации отвечает неустойчиво — работа может прерваться");
             return result;
+        }
+
+        /// <summary>
+        /// Отвечает ли объект автоматизации на обращение.
+        ///
+        /// Наличие процесса ничего не гарантирует: объект может быть создан, а
+        /// связи с процессом не быть. Дешёвое обращение к свойству отличает
+        /// одно от другого сразу, а не на первом полезном вызове через минуту.
+        /// </summary>
+        static bool Responds(dynamic nw)
+        {
+            try
+            {
+                object probe = nw.Visible;   // безобидное чтение
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Log.Write("объект автоматизации не отвечает: " + ex.Message);
+                return false;
+            }
         }
 
         // --------------------------------------------------------------------
@@ -2026,7 +2690,17 @@ namespace NWD2DWG
             try { Directory.CreateDirectory(dir); } catch { }
 
             var report = new StringBuilder();
-            void W(string s) { report.AppendLine(s); Console.WriteLine(s); Log.Write(s); }
+            bool failed = false;
+            void W(string s)
+            {
+                // маркер провала ловим здесь, а не в тексте отчёта в конце:
+                // исключение писало САМОТЕСТ УПАЛ, подстроки ОШИБК там нет,
+                // и упавший самотест возвращал 0 — сборка считала его успешной
+                if (s != null && (s.IndexOf("ОШИБК", StringComparison.Ordinal) >= 0
+                               || s.IndexOf("УПАЛ", StringComparison.Ordinal) >= 0
+                               || s.IndexOf("FAIL", StringComparison.Ordinal) >= 0)) failed = true;
+                report.AppendLine(s); Console.WriteLine(s); Log.Write(s);
+            }
 
             try
             {
@@ -2259,11 +2933,97 @@ namespace NWD2DWG
                 W(string.Format("SpatialTiler & BimAnonymizer: захватка={0}, анонимизация={1}",
                     tileOk ? "OK" : "FAIL", anonOk ? "OK" : "FAIL"));
 
+                // === v3.1: Тест ClashClusterer ===
+                var cPts = new List<Plugin.ClashPoint> {
+                    new Plugin.ClashPoint(100, 100, 100, "C1"),
+                    new Plugin.ClashPoint(150, 120, 110, "C2"),
+                    new Plugin.ClashPoint(5000, 5000, 5000, "C3")
+                };
+                var clusters = Plugin.ClashClusterer.Cluster(cPts, 500.0, 2);
+                bool clusterOk = clusters.Count == 1 && clusters[0].Points.Count == 2;
+                W("ClashClusterer (DBSCAN 3D): " + (clusterOk ? "OK" : "FAIL"));
+
+                // === v3.1: Тест Section2Plan ===
+                var planPolys = Plugin.Section2Plan.Slice(sink.Verts, sink.Quads, 1.0, 0.1);
+                bool planOk = planPolys.Count > 0;
+                W("Section2Plan (2D срез сечений): " + (planOk ? "OK" : "FAIL"));
+
+                // === v3.1: Тест CadPurger ===
+                string purgedDxf = Path.Combine(dir, "selftest_purged.dxf");
+                string purgeLog = Plugin.CadPurger.Purge(p1, purgedDxf);
+                bool purgeOk = File.Exists(purgedDxf) && new FileInfo(purgedDxf).Length > 50;
+                W("CadPurger (DXF Deep Clean): " + (purgeOk ? "OK" : "FAIL"));
+
+                // === v3.2: Тест PenetrationBuilder ===
+                var testPipes = new List<Plugin.PipeAxis> {
+                    new Plugin.PipeAxis { Ax = -1000, Ay = 500, Az = 500, Bx = 1000, By = 500, Bz = 500, DN = 100, SystemName = "Heating" }
+                };
+                var testPlanes = new List<Plugin.ConstructionPlane> {
+                    new Plugin.ConstructionPlane { Nx = 1, Ny = 0, Nz = 0, D = 0, Thickness = 200, ElementName = "Wall_1", ElementType = "Wall", MinX = -100, MaxX = 100, MinY = 0, MaxY = 1000, MinZ = 0, MaxZ = 1000 }
+                };
+                var pens = Plugin.PenetrationBuilder.Build(testPipes, testPlanes);
+                bool penOk = pens.Count == 1 && pens[0].SleeveD == 150.0;
+                W("PenetrationBuilder (Авторасстановка гильз DN+50): " + (penOk ? "OK" : "FAIL"));
+
+                // === v3.2: Тест ClearanceValidator ===
+                var testBoxes = new List<Plugin.SceneBox> {
+                    new Plugin.SceneBox { MinX = 0, MinY = 0, MinZ = 0, MaxX = 2000, MaxY = 2000, MaxZ = 0, IsFloor = true, Name = "Floor" },
+                    new Plugin.SceneBox { MinX = 500, MinY = 500, MinZ = 1500, MaxX = 1500, MaxY = 1500, MaxZ = 1800, IsFloor = false, Name = "LowDuct" }
+                };
+                var viol = Plugin.ClearanceValidator.Validate(testBoxes, 2000.0, 500.0);
+                bool clearOk = viol.Count > 0 && viol[0].Clearance == 1500.0;
+                W("ClearanceValidator (Высота проходов СП 118): " + (clearOk ? "OK" : "FAIL"));
+
+                // === v3.2: Тест SteelProfileMatcher ===
+                var beamVerts = new List<double>();
+                for (int bx = 0; bx <= 3000; bx += 1000)
+                {
+                    beamVerts.AddRange(new double[] { bx, -50, -100,  bx, 50, -100,  bx, 50, 100,  bx, -50, 100 });
+                }
+                var steelMatch = Plugin.SteelProfileMatcher.MatchMesh(beamVerts);
+                bool steelOk = steelMatch.Length > 2900 && !string.IsNullOrEmpty(steelMatch.Designation);
+                W("SteelProfileMatcher (Сортамент ГОСТ КМ/КМД): " + (steelOk ? "OK" : "FAIL"));
+
+                // === v3.3: Тест CogCalculator ===
+                var cogEl = Plugin.CogCalculator.CalculateElement("Cube", sink.Verts, sink.Quads, "Steel");
+                bool cogOk = cogEl.MassKg > 0 && Math.Abs(cogEl.CogX - 1.0) < 0.2;
+                W("CogCalculator (Центр масс Гаусса-Остроградского): " + (cogOk ? "OK" : "FAIL"));
+
+                // === v3.3: Тест IsoGenerator ===
+                var isoNet = Plugin.IsoGenerator.GenerateIsoNetwork(testPipes);
+                var isoJoints = Plugin.IsoGenerator.DetectJoints(isoNet);
+                bool isoOk = isoNet.Count == 1 && isoJoints.Count == 2;
+                W("IsoGenerator (Изометрия трубопроводов ГОСТ 2.317): " + (isoOk ? "OK" : "FAIL"));
+
+                // === v3.4: Тест ScheduleMapper ===
+                var tasks4D = new List<Plugin.ScheduleTask> {
+                    new Plugin.ScheduleTask { Uid = "1", Name = "Монтаж стен", PlannedStart = DateTime.Now.AddDays(-5), PlannedFinish = DateTime.Now.AddDays(5) }
+                };
+                var matches4D = Plugin.ScheduleMapper.EvaluateModel(new List<string>{"Стена_1"}, new List<string>{"Wall"}, tasks4D, DateTime.Now);
+                bool schedOk = matches4D.Count == 1 && matches4D[0].Status == Plugin.Task4DStatus.InProgress;
+                W("ScheduleMapper (4D Calendar Planning): " + (schedOk ? "OK" : "FAIL"));
+
+                // === v3.4: Тест ShrinkWrapper ===
+                var wrapRes = Plugin.ShrinkWrapper.WrapMesh(sink.Verts, sink.Quads);
+                bool wrapOk = wrapRes.OutVerts.Count == 24 && wrapRes.OutQuads.Count == 24;
+                W("ShrinkWrapper (Защита IP / Оболочки OBB): " + (wrapOk ? "OK" : "FAIL"));
+
+                // === v3.4: Тест RoomFinishSchedule ===
+                var rData = new Plugin.RoomData {
+                    Number = "101", Name = "PumpRoom", HeightMm = 3000,
+                    Contour2D = new List<double[]> { new double[]{0,0}, new double[]{4000,0}, new double[]{4000,3000}, new double[]{0,3000} }
+                };
+                rData.Openings.Add(new Plugin.RoomOpening { WidthMm = 900, HeightMm = 2100, IsDoor = true });
+                rData.Calculate();
+                bool roomOk = Math.Abs(rData.FloorAreaM2 - 12.0) < 0.01 && rData.NetWallAreaM2 < rData.GrossWallAreaM2;
+                W("RoomFinishSchedule (Ведомость отделки ГОСТ 21.501): " + (roomOk ? "OK" : "FAIL"));
+
                 bool allOk = polylines == 1 && seqends == 1 && vverts == 8 && fverts == 12 && f3 == 12
                              && decTris < 12 && solidRes.Type == Plugin.SolidType.Box
                              && gltfOk && glbOk && ifcOk && ifcValid
-                             && geoOk && gridOk && pipeOk && boqOk && bcfOk && diffOk && tileOk && anonOk;
-                W("САМОТЕСТ ПРОЙДЕН: " + (allOk ? "OK (все 20 модулей v3.0 исправны)" : "ОШИБКИ"));
+                             && geoOk && gridOk && pipeOk && boqOk && bcfOk && diffOk && tileOk && anonOk
+                             && clusterOk && planOk && purgeOk && penOk && clearOk && steelOk && cogOk && isoOk && schedOk && wrapOk && roomOk;
+                W("САМОТЕСТ ПРОЙДЕН: " + (allOk ? "OK (все 31 алгоритм экосистемы v3.4 исправны)" : "ОШИБКИ"));
             }
             catch (Exception ex)
             {
@@ -2271,7 +3031,7 @@ namespace NWD2DWG
             }
 
             try { File.WriteAllText(Path.Combine(dir, "selftest_report.txt"), report.ToString(), Encoding.UTF8); } catch { }
-            return report.ToString().Contains("ОШИБК") ? 1 : 0;
+            return failed ? 1 : 0;
         }
 
         static int CountOccurrences(string s, string sub)
@@ -2379,6 +3139,82 @@ namespace NWD2DWG
                     return 0;
                 }
 
+                if (cmd == "--screenshot-settings")
+                {
+                    string shotPath = args.Length > 1 ? args[1] : "settings.png";
+                    try
+                    {
+                        var cfg = AdvancedConfig.Load();
+                        var dlg = new ModuleSettingsDialog(cfg, OutputProfile.Load());
+                        dlg.StartPosition = FormStartPosition.Manual;
+                        dlg.Location = new Point(50, 50);
+                        dlg.Show();
+                        // Второй аргумент — номер вкладки: снимок нужен для
+                        // проверки вёрстки каждой из них, а не только первой.
+                        int tabIx;
+                        if (args.Length > 2 && int.TryParse(args[2], out tabIx))
+                            dlg.SelectTab(tabIx);
+                        dlg.Refresh();
+                        for (int s = 0; s < 10; s++) { Application.DoEvents(); Thread.Sleep(30); }
+                        using (var bmp = new Bitmap(dlg.Width, dlg.Height))
+                        {
+                            dlg.DrawToBitmap(bmp, new Rectangle(0, 0, dlg.Width, dlg.Height));
+                            bmp.Save(shotPath, System.Drawing.Imaging.ImageFormat.Png);
+                        }
+                        dlg.Close();
+                    }
+                    catch (Exception ex)
+                    {
+                        File.WriteAllText(shotPath + ".err.txt", ex.ToString());
+                    }
+                    return 0;
+                }
+
+                // Сравнение выдач не требует ни Navisworks, ни исходных моделей:
+                // сопоставляются индексы, которые можно переслать смежнику.
+                if (cmd == "--diff-index")
+                {
+                    if (args.Length < 3)
+                    {
+                        Console.WriteLine("Использование: --diff-index <старый_index.csv> <новый_index.csv> [отчёт.csv]");
+                        return 2;
+                    }
+                    try
+                    {
+                        var oldIdx = Plugin.RevisionIndex.Read(args[1]);
+                        var newIdx = Plugin.RevisionIndex.Read(args[2]);
+                        var diff = Plugin.RevisionIndex.Compare(oldIdx, newIdx);
+                        Console.WriteLine(Plugin.RevisionIndex.Summary(diff));
+                        string shiftNote = Plugin.RevisionIndex.BaseShiftNote(diff);
+                        if (shiftNote.Length > 0) Console.WriteLine(shiftNote);
+
+                        string outCsv = args.Length > 3 ? args[3]
+                                      : Path.ChangeExtension(args[2], null) + "_diff.csv";
+                        Plugin.RevisionIndex.WriteCsv(outCsv, diff,
+                            Path.GetFileName(args[1]), Path.GetFileName(args[2]));
+                        Plugin.RevisionIndex.WriteDxf(Path.ChangeExtension(outCsv, ".dxf"), diff);
+                        Console.WriteLine("отчёт: " + outCsv);
+                        Console.WriteLine("метки: " + Path.ChangeExtension(outCsv, ".dxf"));
+                        return 0;
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine("ОШИБКА сравнения: " + ex.Message);
+                        return 1;
+                    }
+                }
+
+                if (cmd == "--delivery-log")
+                {
+                    string logPath = args.Length > 1 ? args[1] : "";
+                    var rows = Plugin.DeliveryLog.Read(logPath);
+                    if (rows.Count == 0) { Console.WriteLine("Журнал пуст или не найден: " + logPath); return 1; }
+                    Console.WriteLine(Plugin.DeliveryLog.Header);
+                    foreach (var r in rows) Console.WriteLine(string.Join(";", r));
+                    Console.WriteLine("записей: " + rows.Count);
+                    return 0;
+                }
+
                 if (cmd == "--selftest") return SelfTest.Run(args);
                 if (cmd == "--diagnostics")
                 {
@@ -2404,6 +3240,9 @@ namespace NWD2DWG
                     catch (Exception ex)
                     {
                         Console.WriteLine("ОШИБКА: " + ex.Message);
+                        if (ex.InnerException != null)
+                            Console.WriteLine("ПРИЧИНА: " + ex.InnerException);
+                        Console.WriteLine("Лог: " + (Log.FilePath ?? "(не задан)"));
                         Log.Write("CLI ОШИБКА: " + ex);
                         Log.Flush();
                         return 1;
@@ -2417,6 +3256,41 @@ namespace NWD2DWG
             Application.SetCompatibleTextRenderingDefault(false);
             Application.Run(new MainForm());
             return 0;
+        }
+
+        // Установка поля AdvancedConfig по имени. Раньше на каждый ключ
+        // приходилось по три строки с ручным разбором и своим TryParse.
+        static void AdvNum(AppOptions opts, string field, string next, ref int i)
+        {
+            if (next == null || next.StartsWith("--")) return;
+            var fi = typeof(Plugin.AdvancedConfig).GetField(field);
+            double v;
+            if (fi != null && double.TryParse(next, NumberStyles.Float, CultureInfo.InvariantCulture, out v))
+            {
+                if (fi.FieldType == typeof(int)) fi.SetValue(opts.AdvConfig, (int)Math.Round(v));
+                else fi.SetValue(opts.AdvConfig, v);
+            }
+            i++;
+        }
+
+        static void AdvStr(AppOptions opts, string field, string next, ref int i)
+        {
+            if (next == null || next.StartsWith("--")) return;
+            var fi = typeof(Plugin.AdvancedConfig).GetField(field);
+            if (fi != null) fi.SetValue(opts.AdvConfig, next);
+            i++;
+        }
+
+        static string ExtFor(OutFormat f)
+        {
+            switch (f)
+            {
+                case OutFormat.Dwg: return ".dwg";
+                case OutFormat.Gltf: return ".gltf";
+                case OutFormat.Glb: return ".glb";
+                case OutFormat.Ifc: return ".ifc";
+                default: return ".dxf";
+            }
         }
 
         public static Bitmap RenderControlTree(Control root)
@@ -2596,7 +3470,7 @@ namespace NWD2DWG
                         if (next != null && !next.StartsWith("--") && (next == "0" || next == "1" || next.Equals("true", StringComparison.OrdinalIgnoreCase) || next.Equals("false", StringComparison.OrdinalIgnoreCase))) i++;
                         break;
                     case "--navis":
-                        opts.NavisworksDir = next; if (next != null && !next.StartsWith("--")) i++;
+                        if (next != null && !next.StartsWith("--")) { opts.NavisworksDir = next; i++; }
                         break;
                     // === v2.0 CLI flags ===
                     case "--decimate":
@@ -2645,17 +3519,196 @@ namespace NWD2DWG
                     case "--interval":
                         if (next != null && !next.StartsWith("--")) { int iv; if (int.TryParse(next, out iv)) opts.WatchInterval = Math.Max(1, iv); i++; }
                         break;
+                    // === v3.0 CLI flags ===
+                    case "--geoshift": case "--geo":
+                        opts.GeoShift = next == null || next.StartsWith("--") || (next != "0" && !next.Equals("false", StringComparison.OrdinalIgnoreCase));
+                        if (next != null && !next.StartsWith("--") && (next == "0" || next == "1" || next.Equals("true", StringComparison.OrdinalIgnoreCase) || next.Equals("false", StringComparison.OrdinalIgnoreCase))) i++;
+                        break;
+                    case "--grids":
+                        opts.ExportGrids = next == null || next.StartsWith("--") || (next != "0" && !next.Equals("false", StringComparison.OrdinalIgnoreCase));
+                        if (next != null && !next.StartsWith("--") && (next == "0" || next == "1" || next.Equals("true", StringComparison.OrdinalIgnoreCase) || next.Equals("false", StringComparison.OrdinalIgnoreCase))) i++;
+                        break;
+                    case "--tracepipes": case "--pipes":
+                        opts.TracePipes = next == null || next.StartsWith("--") || (next != "0" && !next.Equals("false", StringComparison.OrdinalIgnoreCase));
+                        if (next != null && !next.StartsWith("--") && (next == "0" || next == "1" || next.Equals("true", StringComparison.OrdinalIgnoreCase) || next.Equals("false", StringComparison.OrdinalIgnoreCase))) i++;
+                        break;
+                    case "--boq":
+                        opts.ExportBoq = next == null || next.StartsWith("--") || (next != "0" && !next.Equals("false", StringComparison.OrdinalIgnoreCase));
+                        if (next != null && !next.StartsWith("--") && (next == "0" || next == "1" || next.Equals("true", StringComparison.OrdinalIgnoreCase) || next.Equals("false", StringComparison.OrdinalIgnoreCase))) i++;
+                        break;
+                    case "--bcf":
+                        opts.ExportBcf = next == null || next.StartsWith("--") || (next != "0" && !next.Equals("false", StringComparison.OrdinalIgnoreCase));
+                        if (next != null && !next.StartsWith("--") && (next == "0" || next == "1" || next.Equals("true", StringComparison.OrdinalIgnoreCase) || next.Equals("false", StringComparison.OrdinalIgnoreCase))) i++;
+                        break;
+                    case "--anonymize":
+                        opts.Anonymize = next == null || next.StartsWith("--") || (next != "0" && !next.Equals("false", StringComparison.OrdinalIgnoreCase));
+                        if (next != null && !next.StartsWith("--") && (next == "0" || next == "1" || next.Equals("true", StringComparison.OrdinalIgnoreCase) || next.Equals("false", StringComparison.OrdinalIgnoreCase))) i++;
+                        break;
+                    // === v3.1 – v3.4 CLI flags ===
+                    case "--clash-cluster":
+                        opts.ClusterClashes = next == null || next.StartsWith("--") || (next != "0" && !next.Equals("false", StringComparison.OrdinalIgnoreCase));
+                        if (next != null && !next.StartsWith("--") && (next == "0" || next == "1" || next.Equals("true", StringComparison.OrdinalIgnoreCase) || next.Equals("false", StringComparison.OrdinalIgnoreCase))) i++;
+                        break;
+                    case "--section-plan":
+                        opts.SectionPlan = next == null || next.StartsWith("--") || (next != "0" && !next.Equals("false", StringComparison.OrdinalIgnoreCase));
+                        if (next != null && !next.StartsWith("--") && (next == "0" || next == "1" || next.Equals("true", StringComparison.OrdinalIgnoreCase) || next.Equals("false", StringComparison.OrdinalIgnoreCase))) i++;
+                        break;
+                    case "--purge":
+                        opts.PurgeDxf = next == null || next.StartsWith("--") || (next != "0" && !next.Equals("false", StringComparison.OrdinalIgnoreCase));
+                        if (next != null && !next.StartsWith("--") && (next == "0" || next == "1" || next.Equals("true", StringComparison.OrdinalIgnoreCase) || next.Equals("false", StringComparison.OrdinalIgnoreCase))) i++;
+                        break;
+                    case "--penetrations":
+                        opts.BuildPenetrations = next == null || next.StartsWith("--") || (next != "0" && !next.Equals("false", StringComparison.OrdinalIgnoreCase));
+                        if (next != null && !next.StartsWith("--") && (next == "0" || next == "1" || next.Equals("true", StringComparison.OrdinalIgnoreCase) || next.Equals("false", StringComparison.OrdinalIgnoreCase))) i++;
+                        break;
+                    case "--clearance":
+                        opts.ValidateClearance = next == null || next.StartsWith("--") || (next != "0" && !next.Equals("false", StringComparison.OrdinalIgnoreCase));
+                        if (next != null && !next.StartsWith("--") && (next == "0" || next == "1" || next.Equals("true", StringComparison.OrdinalIgnoreCase) || next.Equals("false", StringComparison.OrdinalIgnoreCase))) i++;
+                        break;
+                    case "--steel":
+                        opts.MatchSteel = next == null || next.StartsWith("--") || (next != "0" && !next.Equals("false", StringComparison.OrdinalIgnoreCase));
+                        if (next != null && !next.StartsWith("--") && (next == "0" || next == "1" || next.Equals("true", StringComparison.OrdinalIgnoreCase) || next.Equals("false", StringComparison.OrdinalIgnoreCase))) i++;
+                        break;
+                    case "--cog":
+                        opts.CalcCog = next == null || next.StartsWith("--") || (next != "0" && !next.Equals("false", StringComparison.OrdinalIgnoreCase));
+                        if (next != null && !next.StartsWith("--") && (next == "0" || next == "1" || next.Equals("true", StringComparison.OrdinalIgnoreCase) || next.Equals("false", StringComparison.OrdinalIgnoreCase))) i++;
+                        break;
+                    case "--iso":
+                        opts.GenerateIso = next == null || next.StartsWith("--") || (next != "0" && !next.Equals("false", StringComparison.OrdinalIgnoreCase));
+                        if (next != null && !next.StartsWith("--") && (next == "0" || next == "1" || next.Equals("true", StringComparison.OrdinalIgnoreCase) || next.Equals("false", StringComparison.OrdinalIgnoreCase))) i++;
+                        break;
+                    case "--4d":
+                        opts.MapSchedule4D = next == null || next.StartsWith("--") || (next != "0" && !next.Equals("false", StringComparison.OrdinalIgnoreCase));
+                        if (next != null && !next.StartsWith("--") && (next == "0" || next == "1" || next.Equals("true", StringComparison.OrdinalIgnoreCase) || next.Equals("false", StringComparison.OrdinalIgnoreCase))) i++;
+                        break;
+                    case "--shrinkwrap":
+                        opts.Shrinkwrap = next == null || next.StartsWith("--") || (next != "0" && !next.Equals("false", StringComparison.OrdinalIgnoreCase));
+                        if (next != null && !next.StartsWith("--") && (next == "0" || next == "1" || next.Equals("true", StringComparison.OrdinalIgnoreCase) || next.Equals("false", StringComparison.OrdinalIgnoreCase))) i++;
+                        break;
+                    case "--room-finish":
+                        opts.RoomFinish = next == null || next.StartsWith("--") || (next != "0" && !next.Equals("false", StringComparison.OrdinalIgnoreCase));
+                        if (next != null && !next.StartsWith("--") && (next == "0" || next == "1" || next.Equals("true", StringComparison.OrdinalIgnoreCase) || next.Equals("false", StringComparison.OrdinalIgnoreCase))) i++;
+                        break;
+                    case "--preset":
+                        if (next != null && !next.StartsWith("--"))
+                        {
+                            var pr = Plugin.ConfigPreset.ByName(next);
+                            if (pr != null)
+                            {
+                                pr.ApplyTo(opts.AdvConfig, opts.OutProfile);
+                                Console.WriteLine("Применён шаблон: " + pr.Name + " (" + pr.Norms + ")");
+                            }
+                            else
+                            {
+                                Console.WriteLine("Неизвестный шаблон: " + next + ". Доступные:");
+                                foreach (var p2 in Plugin.ConfigPreset.All) Console.WriteLine("  " + p2.Name);
+                            }
+                            i++;
+                        }
+                        break;
+                    // === Допуски модулей (все линейные величины — в мм) ===
+                    case "--clash-eps":
+                        AdvNum(opts, "ClashEpsilonMm", next, ref i); break;
+                    case "--clash-minpts":
+                        AdvNum(opts, "ClashMinPts", next, ref i); break;
+                    case "--clash-mindist":
+                    case "--clash-tol":
+                        AdvNum(opts, "ClashMinDistanceMm", next, ref i); break;
+                    case "--bcf-author":
+                        AdvStr(opts, "BcfAuthor", next, ref i); break;
+                    case "--sched-source":
+                        AdvStr(opts, "ScheduleSource", next, ref i); break;
+                    case "--sched-date":
+                        AdvStr(opts, "ScheduleStatusDate", next, ref i); break;
+                    case "--min-headroom":
+                        AdvNum(opts, "MinHeadroomCorridorMm", next, ref i); break;
+                    case "--clearance-cell":
+                        AdvNum(opts, "ClearanceCellMm", next, ref i); break;
+                    case "--section-z":
+                        AdvNum(opts, "SectionCutHeightMm", next, ref i); break;
+                    case "--section-eps":
+                        AdvNum(opts, "SectionDpEpsMm", next, ref i); break;
+                    case "--section-layer":
+                        AdvStr(opts, "SectionLayer", next, ref i); break;
+                    case "--room-min-area":
+                        AdvNum(opts, "RoomMinAreaM2", next, ref i); break;
+                    case "--room-max-area":
+                        AdvNum(opts, "RoomMaxAreaM2", next, ref i); break;
+                    case "--room-height":
+                        AdvNum(opts, "RoomHeightMm", next, ref i); break;
+                    case "--pipe-dn-min":
+                        AdvNum(opts, "PipeMinDiameterMm", next, ref i); break;
+                    case "--pipe-dn-max":
+                        AdvNum(opts, "PipeMaxDiameterMm", next, ref i); break;
+                    case "--pipe-min-len":
+                        AdvNum(opts, "PipeMinLengthMm", next, ref i); break;
+                    case "--sleeve-gap":
+                        AdvNum(opts, "SleeveGapMediumMm", next, ref i); break;
+                    case "--sleeve-ext":
+                        AdvNum(opts, "SleeveExtensionMm", next, ref i); break;
+                    case "--sleeve-min-thk":
+                        AdvNum(opts, "SleeveMinStructureMm", next, ref i); break;
+                    case "--steel-tol":
+                        AdvNum(opts, "SteelTolerancePct", next, ref i); break;
+                    case "--steel-custom":
+                        AdvStr(opts, "SteelIncludeCustom", next, ref i); break;
+                    case "--steel-min-len":
+                        AdvNum(opts, "SteelMinLengthMm", next, ref i); break;
+                    case "--density-steel":
+                        AdvNum(opts, "DensitySteel", next, ref i); break;
+                    case "--density-concrete":
+                        AdvNum(opts, "DensityConcrete", next, ref i); break;
+                    case "--density-piping":
+                    case "--density-water":
+                        AdvNum(opts, "DensityPiping", next, ref i); break;
+                    case "--cog-min-mass":
+                        AdvNum(opts, "CogMinMassKg", next, ref i); break;
+                    case "--decimate-min-tris":
+                        AdvNum(opts, "DecimateMinTriangles", next, ref i); break;
+                    case "--solid-confidence":
+                        AdvNum(opts, "SolidMinConfidence", next, ref i); break;
+                    case "--shrink-lvl":
+                        AdvNum(opts, "ShrinkwrapLevel", next, ref i); break;
+                    case "--boq-group":
+                        AdvStr(opts, "BoqGroupBy", next, ref i); break;
+
+                    // Формат ведомостей есть в окне, но из командной строки был
+                    // недоступен — а именно ей пользуются пакетная обработка и
+                    // управление снаружи, которым книга Excel нужна не меньше.
+                    case "--report-format":
+                        if (next != null && !next.StartsWith("--"))
+                        {
+                            string rf = next.Trim().ToLowerInvariant();
+                            if (rf == "csv") opts.OutProfile.ReportFormat = "Csv";
+                            else if (rf == "xlsx") opts.OutProfile.ReportFormat = "Xlsx";
+                            else if (rf == "both") opts.OutProfile.ReportFormat = "Both";
+                            else Console.WriteLine("Неизвестный формат ведомостей: " + next +
+                                                   ". Допустимо: csv, xlsx, both");
+                            i++;
+                        }
+                        break;
+                    case "--schedule":
+                        if (next != null && !next.StartsWith("--")) { opts.ScheduleFile = next; i++; }
+                        break;
                     default:
-                        if (a.StartsWith("--")) break;
+                        // раньше опечатка во флаге (--out вместо позиционного
+                        // пути) молча игнорировалась и конвертация падала
+                        // где-то глубже с невнятной ошибкой
+                        if (a.StartsWith("--"))
+                        {
+                            Console.WriteLine("ПРЕДУПРЕЖДЕНИЕ: неизвестный ключ игнорируется: " + a);
+                            break;
+                        }
                         if (opts.Input == null) opts.Input = a;
                         else if (outPath == null) outPath = a;
+                        else Console.WriteLine("ПРЕДУПРЕЖДЕНИЕ: лишний аргумент игнорируется: " + a);
                         break;
                 }
             }
 
             if (string.IsNullOrEmpty(opts.Input) && cmd != "--watch")
             {
-                Console.WriteLine("NWD2DWG v2.0 — Конвертер Navisworks → AutoCAD/glTF/IFC");
+                Console.WriteLine("NWD2DWG v3.5 — Конвертер Navisworks → AutoCAD/glTF/IFC");
                 Console.WriteLine("использование: NWD2DWG --convert <файл.nwd|nwc|nwf> <выход.dxf|dwg|gltf|glb|ifc> [опции]");
                 Console.WriteLine("  --format dxf|3dface|dwg|gltf|glb|ifc");
                 Console.WriteLine("  --visible 0|1  --skiphidden 0|1  --colors 0|1  --layers 0|1  --navis <папка>");
@@ -2664,10 +3717,22 @@ namespace NWD2DWG
                 Console.WriteLine("  --xdata 1           Перенос BIM-свойств в XData");
                 Console.WriteLine("  --materials 1       Перенос прозрачности/материалов");
                 Console.WriteLine("  --sets \"Трубы,Стены\" Фильтр по Selection Sets");
-                Console.WriteLine("  --bbox minX,minY,minZ,maxX,maxY,maxZ  Section Box обрезка");
-                Console.WriteLine("  --threads <N>       Кол-во потоков (0=авто)");
-                Console.WriteLine("  --watch <папка>     Фоновый мониторинг папки");
-                Console.WriteLine("  --interval <сек>    Интервал мониторинга (по умолчанию 5)");
+                Console.WriteLine("  --geoshift 1        Сдвиг к нулю (0,0,0) + .wld");
+                Console.WriteLine("  --grids 1           Оси и уровни (_GRIDS / _LEVELS)");
+                Console.WriteLine("  --pipes 1           Оси труб и DN (PipeTracer)");
+                Console.WriteLine("  --boq 1             Расчет объемов ВОР в Excel");
+                Console.WriteLine("  --bcf 1             Коллизии BCF 2.1 zip");
+                Console.WriteLine("  --clash-cluster 1   Кластеризация коллизий DBSCAN");
+                Console.WriteLine("  --section-plan 1    2D поэтажный план (Z-срез)");
+                Console.WriteLine("  --purge 1           Глубокая чистка DXF");
+                Console.WriteLine("  --penetrations 1    Расстановка гильз (DN+50)");
+                Console.WriteLine("  --clearance 1       Контроль высоты проходов (СП 118)");
+                Console.WriteLine("  --steel 1           Сортамент стали ГОСТ (КМ/КМД)");
+                Console.WriteLine("  --cog 1             Центр масс блока (CoG)");
+                Console.WriteLine("  --iso 1             Изометрия трубопроводов ГОСТ 2.317");
+                Console.WriteLine("  --4d 1              4D календарный график");
+                Console.WriteLine("  --shrinkwrap 1      Защита IP (OBB-оболочки)");
+                Console.WriteLine("  --room-finish 1     Ведомость отделки ГОСТ 21.501");
                 return 2;
             }
 
@@ -2749,6 +3814,59 @@ namespace NWD2DWG
                 return 0;
             }
 
+            // Путь без расширения — это папка, даже если её ещё нет. Раньше
+            // несуществующий путь принимался за имя файла: выдача уходила в
+            // файл без расширения, а ведомости и протокол — в родительский
+            // каталог. Внешний вызов, который сам папку не создал, получал
+            // именно это.
+            // Папка на входе — это пакетная обработка, а не модель.
+            //
+            // Проверка стоит ДО приведения выходного пути: иначе папка выдачи
+            // превращается в имя файла по имени входной папки, и вся выдача
+            // ложится в каталог вроде out\in.dxf — именно так и вышло.
+            // И до всякого обращения к Navisworks: иначе путь уходит туда как
+            // имя модели и всплывает модальное окно, которое в автоматическом
+            // прогоне некому закрыть.
+            if (cmd == "--convert" && Directory.Exists(opts.Input))
+                return ConvertFolder(opts, Path.GetFullPath(opts.Input), outPath);
+
+            if (outPath != null && !Directory.Exists(outPath) && !File.Exists(outPath)
+                && string.IsNullOrEmpty(Path.GetExtension(outPath)))
+            {
+                try
+                {
+                    Directory.CreateDirectory(outPath);
+                    Console.WriteLine("Папка выдачи создана: " + outPath);
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine("Не удалось создать папку выдачи: " + ex.Message);
+                }
+            }
+
+            // путь вывода — это файл, а не папка: иначе плагин падал на
+            // UnauthorizedAccessException при создании StreamWriter
+            if (outPath != null && Directory.Exists(outPath))
+            {
+                outPath = Path.Combine(outPath,
+                    Path.GetFileNameWithoutExtension(opts.Input ?? "output") + ExtFor(opts.Format));
+                Console.WriteLine("Указана папка — файл будет создан как: " + outPath);
+            }
+
+            if (!File.Exists(opts.Input))
+            {
+                Console.WriteLine("Файл не найден: " + opts.Input);
+                return 2;
+            }
+
+            string inExt = Path.GetExtension(opts.Input).ToLowerInvariant();
+            if (inExt != ".nwd" && inExt != ".nwc" && inExt != ".nwf")
+            {
+                Console.WriteLine("Navisworks не открывает файлы «" + inExt +
+                                  "». Нужны .nwd, .nwc или .nwf.");
+                return 2;
+            }
+
             if (outPath == null)
             {
                 string ext = ".dxf";
@@ -2778,6 +3896,89 @@ namespace NWD2DWG
                 s => { Console.WriteLine(s); }, d => { }, () => false);
             Console.WriteLine("готово: " + outPath + " | треугольников: " + st.Triangles + " | " + st.OutputBytes + " байт");
             return 0;
+        }
+
+        /// <summary>
+        /// Обработка папки целиком из командной строки.
+        ///
+        /// В окне режим «Папка целиком» был, а в командной строке путь к папке
+        /// уходил в Navisworks как имя модели. Тот не находил модуль для
+        /// «расширения» in и показывал модальное окно — в автоматическом
+        /// прогоне это вечное зависание, потому что нажать «ОК» некому.
+        ///
+        /// Отказ на одном файле не прекращает обход: остальные модели папки
+        /// должны быть обработаны, а список непрошедших выводится в конце.
+        /// </summary>
+        static int ConvertFolder(AppOptions opts, string inDir, string outDir)
+        {
+            var files = new List<string>();
+            foreach (string ext in new[] { "*.nwd", "*.nwc", "*.nwf" })
+            {
+                try { files.AddRange(Directory.GetFiles(inDir, ext, SearchOption.AllDirectories)); }
+                catch (Exception ex) { Console.WriteLine("не удалось прочитать папку: " + ex.Message); }
+            }
+            files.Sort(StringComparer.OrdinalIgnoreCase);
+
+            if (files.Count == 0)
+            {
+                Console.WriteLine("В папке нет моделей .nwd/.nwc/.nwf: " + inDir);
+                return 2;
+            }
+
+            if (string.IsNullOrEmpty(outDir)) outDir = inDir;
+            try { Directory.CreateDirectory(outDir); } catch { }
+
+            Console.WriteLine("Папка: " + inDir);
+            Console.WriteLine("Моделей к обработке: " + files.Count);
+
+            string ext2 = ExtFor(opts.Format);
+            int done = 0;
+            var failed = new List<string>();
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+
+            for (int i = 0; i < files.Count; i++)
+            {
+                string src = files[i];
+                string dst = Path.Combine(outDir,
+                    Path.GetFileNameWithoutExtension(src) + ext2);
+
+                Console.WriteLine();
+                Console.WriteLine(string.Format(CultureInfo.InvariantCulture,
+                    "--- {0} из {1}: {2}", i + 1, files.Count, Path.GetFileName(src)));
+
+                string logFile = Path.Combine(Path.GetDirectoryName(Path.GetFullPath(dst)) ?? ".",
+                    Path.GetFileNameWithoutExtension(dst) + "_NWD2DWG.log");
+                Log.SetFile(logFile);
+
+                try
+                {
+                    opts.Input = src;
+                    ConvertStats st = NavisConverter.ConvertFile(opts,
+                        Path.GetFullPath(src), Path.GetFullPath(dst),
+                        s => Console.WriteLine(s), d => { }, () => false);
+                    Console.WriteLine("готово: " + Path.GetFileName(dst) +
+                                      " | треугольников: " + st.Triangles);
+                    done++;
+                }
+                catch (Exception ex)
+                {
+                    // Одна испорченная модель не должна останавливать всю папку.
+                    Console.WriteLine("ОШИБКА на " + Path.GetFileName(src) + ": " + ex.Message);
+                    failed.Add(Path.GetFileName(src) + " — " + ex.Message);
+                }
+            }
+
+            Console.WriteLine();
+            Console.WriteLine(string.Format(CultureInfo.InvariantCulture,
+                "Папка обработана: успешно {0} из {1}, время {2:hh\\:mm\\:ss}",
+                done, files.Count, sw.Elapsed));
+
+            if (failed.Count > 0)
+            {
+                Console.WriteLine("Не обработаны:");
+                foreach (string f in failed) Console.WriteLine("  " + f);
+            }
+            return failed.Count == 0 ? 0 : 1;
         }
     }
 
@@ -2850,8 +4051,14 @@ namespace NWD2DWG
             }
             finally
             {
-                try { if (nw != null) nw.Dispose(); } catch { }
-                try { if (manualRoamer != null && !manualRoamer.HasExited) manualRoamer.Kill(); } catch { }
+                // Чужое окно, к которому мы подключились, закрывать нельзя:
+                // человек мог оставить его открытым для своей работы.
+                if (NavisConverter.OwnsInstance)
+                {
+                    try { if (nw != null) nw.Dispose(); } catch { }
+                    try { if (manualRoamer != null && !manualRoamer.HasExited) manualRoamer.Kill(); } catch { }
+                }
+                else Log.Write("Navisworks оставлен открытым: подключались к чужому окну");
             }
             File.WriteAllText(outFile, sb.ToString(), Encoding.UTF8);
             Log.Write(sb.ToString());
@@ -2859,19 +4066,20 @@ namespace NWD2DWG
     }
 
     // ------------------------------------------------------------------------
-    // GUI (AutoCAD 2026 Dark Theme Style)
+    // GUI (AutoCAD 2026 / MultiCAD Dark Theme Style & DWM Frame)
     // ------------------------------------------------------------------------
     public class DarkPanelGroup : Panel
     {
         public string Title { get; set; }
-        public Color BorderColor = Color.FromArgb(56, 66, 82);
-        public Color HeaderColor = Color.FromArgb(0, 162, 255);
+        public Color BorderColor = MainForm.ColBorder;
+        public Color HeaderBg = MainForm.ColPanelHeader;
+        public Color TitleColor = MainForm.ColText;
 
         public DarkPanelGroup()
         {
             SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer, true);
-            Padding = new Padding(12, 22, 12, 8);
-            BackColor = Color.FromArgb(28, 33, 40);
+            Padding = new Padding(10, 28, 10, 6);
+            BackColor = MainForm.ColPanel;
         }
 
         protected override void OnPaint(PaintEventArgs e)
@@ -2880,26 +4088,31 @@ namespace NWD2DWG
             Graphics g = e.Graphics;
             g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
 
-            var rect = new Rectangle(0, 8, Width - 1, Height - 9);
+            // Тело панели
+            using (var b = new SolidBrush(BackColor))
+            {
+                g.FillRectangle(b, 0, 0, Width - 1, Height - 1);
+            }
+
+            // Полоса заголовка панели
+            using (var b = new SolidBrush(HeaderBg))
+            {
+                g.FillRectangle(b, 0, 0, Width - 1, 24);
+            }
+
+            // Рамка и разделитель
             using (var p = new Pen(BorderColor, 1))
             {
-                g.DrawRectangle(p, rect);
+                g.DrawLine(p, 0, 24, Width - 1, 24);
+                g.DrawRectangle(p, 0, 0, Width - 1, Height - 1);
             }
 
             if (!string.IsNullOrEmpty(Title))
             {
                 using (var font = new Font("Segoe UI", 9f, FontStyle.Bold))
+                using (var b = new SolidBrush(TitleColor))
                 {
-                    SizeF sz = g.MeasureString(Title, font);
-                    var textRect = new Rectangle(12, 0, (int)sz.Width + 8, (int)sz.Height);
-                    using (var b = new SolidBrush(BackColor))
-                    {
-                        g.FillRectangle(b, textRect);
-                    }
-                    using (var b = new SolidBrush(HeaderColor))
-                    {
-                        g.DrawString(Title, font, b, 16, 0);
-                    }
+                    g.DrawString(Title, font, b, 8, 3);
                 }
             }
         }
@@ -2935,6 +4148,20 @@ namespace NWD2DWG
         CheckBox _cbBoq;
         CheckBox _cbBcf;
         CheckBox _cbAnonymize;
+        // v3.1 – v3.4 контролы
+        CheckBox _cbClashCluster;
+        CheckBox _cbSectionPlan;
+        CheckBox _cbCadPurge;
+        CheckBox _cbPenetrations;
+        CheckBox _cbClearance;
+        CheckBox _cbSteelMatcher;
+        CheckBox _cbCog;
+        CheckBox _cbIso;
+        CheckBox _cbSchedule4D;
+        CheckBox _cbShrinkwrap;
+        CheckBox _cbRoomFinish;
+        AdvancedConfig _advConfig = AdvancedConfig.Load();
+        OutputProfile _outProfile = OutputProfile.Load();
         Button _btnCleanTemp;
         Button _btnConvert;
         Button _btnCancel;
@@ -2947,22 +4174,77 @@ namespace NWD2DWG
 
         bool _running;
         volatile bool _cancel;
+        readonly ToolTip _tips = new ToolTip { AutoPopDelay = 15000, InitialDelay = 400, ReshowDelay = 200 };
 
-        static readonly Color ColBg = Color.FromArgb(28, 33, 40);
-        static readonly Color ColPanel = Color.FromArgb(34, 40, 49);
-        static readonly Color ColBorder = Color.FromArgb(56, 66, 82);
-        static readonly Color ColText = Color.FromArgb(230, 237, 243);
-        static readonly Color ColTextMuted = Color.FromArgb(139, 148, 158);
-        static readonly Color ColAccent = Color.FromArgb(0, 162, 255);
-        static readonly Color ColInput = Color.FromArgb(18, 22, 28);
-        static readonly Color ColBtnPrimary = Color.FromArgb(0, 122, 204);
-        static readonly Color ColBtnSec = Color.FromArgb(45, 52, 64);
+        // Цветовая палитра из MultiCAD (CadPalette.xaml / CadStyles.xaml)
+        public static readonly Color ColBg = Color.FromArgb(33, 37, 43);             // #21252B (CadCanvasBg)
+        public static readonly Color ColHeader = Color.FromArgb(44, 48, 56);         // #2C3038 (CadTitleBarBg)
+        public static readonly Color ColPanel = Color.FromArgb(42, 46, 53);          // #2A2E35 (CadInputBg / Group body)
+        public static readonly Color ColPanelHeader = Color.FromArgb(55, 60, 68);    // #373C44 (CadRibbonBg / Header strip)
+        public static readonly Color ColBorder = Color.FromArgb(76, 82, 92);         // #4C525C (CadPanelBorder)
+        public static readonly Color ColBorderDark = Color.FromArgb(44, 50, 61);     // #2C323D (CadBorderDark)
+        public static readonly Color ColSeparator = Color.FromArgb(71, 77, 87);      // #474D57 (CadPanelSeparator)
+        public static readonly Color ColInput = Color.FromArgb(20, 22, 26);          // #14161A (Deep dark input / terminal)
+        public static readonly Color ColAccent = Color.FromArgb(60, 143, 212);       // #3C8FD4 (CadAccentBlue)
+        public static readonly Color ColCyan = Color.FromArgb(111, 212, 245);        // #6FD4F5 (IcoCyan)
+        public static readonly Color ColBtnPrimary = Color.FromArgb(14, 94, 158);    // #0E5E9E (CadActiveBlue)
+        public static readonly Color ColBtnPrimaryHover = Color.FromArgb(31, 132, 200); // #1F84C8
+        public static readonly Color ColBtnSec = Color.FromArgb(44, 49, 60);         // #2C313C (Secondary button)
+        public static readonly Color ColBtnSecHover = Color.FromArgb(62, 70, 83);    // #3E4653
+        public static readonly Color ColChecked = Color.FromArgb(44, 110, 168);      // #2C6EA8 (CadCheckedBg)
+        public static readonly Color ColHoverBg = Color.FromArgb(74, 81, 92);        // #4A515C (CadHoverBg)
+        public static readonly Color ColText = Color.FromArgb(230, 232, 235);        // #E6E8EB (CadTextPrimary)
+        public static readonly Color ColTextSecondary = Color.FromArgb(174, 180, 189); // #AEB4BD
+        public static readonly Color ColTextMuted = Color.FromArgb(126, 133, 143);   // #7E858F (CadTextDim)
+        public static readonly Color ColLogoRed = Color.FromArgb(224, 26, 34);       // #E01A22 (App Logo Red)
+
+        [DllImport("dwmapi.dll", PreserveSig = true)]
+        private static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int attrValue, int attrSize);
+
+        private const int DWMWA_USE_IMMERSIVE_DARK_MODE_BEFORE_20H1 = 19;
+        private const int DWMWA_USE_IMMERSIVE_DARK_MODE = 20;
+        private const int DWMWA_BORDER_COLOR = 34;
+        private const int DWMWA_CAPTION_COLOR = 35;
+        private const int DWMWA_TEXT_COLOR = 36;
+
+        public static void ApplyDwmDarkTheme(Form form)
+        {
+            if (form == null || !form.IsHandleCreated) return;
+            try
+            {
+                IntPtr handle = form.Handle;
+                int dark = 1;
+                DwmSetWindowAttribute(handle, DWMWA_USE_IMMERSIVE_DARK_MODE, ref dark, sizeof(int));
+                DwmSetWindowAttribute(handle, DWMWA_USE_IMMERSIVE_DARK_MODE_BEFORE_20H1, ref dark, sizeof(int));
+
+                // 0x00BBGGRR (COLORREF)
+                // ColHeader #2C3038 -> 0x0038302C
+                int captionColor = 0x0038302C;
+                DwmSetWindowAttribute(handle, DWMWA_CAPTION_COLOR, ref captionColor, sizeof(int));
+
+                // ColBorder #4C525C -> 0x005C524C
+                int borderColor = 0x005C524C;
+                DwmSetWindowAttribute(handle, DWMWA_BORDER_COLOR, ref borderColor, sizeof(int));
+
+                // ColText #E6E8EB -> 0x00EBE8E6
+                int textColor = 0x00EBE8E6;
+                DwmSetWindowAttribute(handle, DWMWA_TEXT_COLOR, ref textColor, sizeof(int));
+            }
+            catch { }
+        }
+
+        protected override void OnHandleCreated(EventArgs e)
+        {
+            base.OnHandleCreated(e);
+            ApplyDwmDarkTheme(this);
+        }
 
         public MainForm()
         {
-            Text = "NWD2DWG v3.0 — BaidurovLabs (GNU GPL v3)";
-            Width = 1180; Height = 1040;
-            MinimumSize = new Size(1080, 940);
+            Text = "NWD2DWG 3.5 — конвертер моделей Navisworks";
+            try { Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath); } catch { }
+            Width = 1180; Height = 1100;
+            MinimumSize = new Size(1080, 960);
             StartPosition = FormStartPosition.CenterScreen;
             BackColor = ColBg;
             ForeColor = ColText;
@@ -2974,57 +4256,44 @@ namespace NWD2DWG
             {
                 Dock = DockStyle.Top,
                 Height = 44,
-                BackColor = ColBg,
-                Padding = new Padding(14, 8, 14, 0)
+                BackColor = ColHeader,
+                Padding = new Padding(12, 6, 14, 0)
             };
 
-            var pBrand = new FlowLayoutPanel
+            // Кнопки быстрого доступа QAT
+            var pQat = new FlowLayoutPanel
             {
-                Dock = DockStyle.Right,
-                AutoSize = true,
-                AutoSizeMode = AutoSizeMode.GrowAndShrink,
-                Height = 34,
-                FlowDirection = FlowDirection.RightToLeft,
+                Location = new Point(12, 7),
+                Size = new Size(94, 30),
+                FlowDirection = FlowDirection.LeftToRight,
                 WrapContents = false,
                 Margin = new Padding(0)
             };
-            var lnkSite = new LinkLabel
-            {
-                Text = "baidurovlabs.ru",
-                LinkColor = Color.FromArgb(88, 166, 255),
-                ActiveLinkColor = Color.FromArgb(165, 214, 255),
-                VisitedLinkColor = Color.FromArgb(88, 166, 255),
-                Font = new Font("Segoe UI", 9.5f, FontStyle.Bold),
-                AutoSize = true,
-                Margin = new Padding(6, 3, 0, 0)
-            };
-            lnkSite.LinkClicked += (s, e) => { try { Process.Start(new ProcessStartInfo("https://baidurovlabs.ru") { UseShellExecute = true }); } catch { } };
 
-            var lnkLicTop = new LinkLabel
-            {
-                Text = "GNU GPL v3 (Свободное ПО)  |",
-                LinkColor = ColTextMuted,
-                ActiveLinkColor = ColAccent,
-                VisitedLinkColor = ColTextMuted,
-                AutoSize = true,
-                Margin = new Padding(0, 4, 0, 0)
-            };
-            lnkLicTop.LinkClicked += (s, e) => ShowLicenseDialog();
+            // В шапке — только работа с файлами. Диагностика, очистка, журнал
+            // и «О программе» остались подписанными кнопками внизу окна:
+            // дублировать их значками незачем, подпись понятнее значка.
+            Button qatNew = CreateQatButton("＋", "Сбросить поля (Очистить)", (s, e) => { _tbInput.Text = ""; _tbOutput.Text = ""; });
+            Button qatOpen = CreateQatButton("⎘", "Выбрать файл Navisworks", (s, e) => BrowseInput());
+            Button qatFolder = CreateQatButton("⌂", "Выбрать папку сохранения", (s, e) => BrowseOutput());
 
-            pBrand.Controls.Add(lnkSite);
-            pBrand.Controls.Add(lnkLicTop);
+            pQat.Controls.Add(qatNew);
+            pQat.Controls.Add(qatOpen);
+            pQat.Controls.Add(qatFolder);
 
             var lbTitle = new System.Windows.Forms.Label
             {
-                Text = "NWD2DWG v3.0  |  BIM-конвертер Navisworks",
-                Font = new Font("Segoe UI", 11f, FontStyle.Bold),
-                ForeColor = ColAccent,
-                Dock = DockStyle.Fill,
-                TextAlign = ContentAlignment.MiddleLeft
+                Text = "NWD2DWG v3.5  |  BIM-конвертер Navisworks",
+                Font = new Font("Segoe UI", 10.5f, FontStyle.Bold),
+                ForeColor = ColText,
+                Location = new Point(118, 11),
+                AutoSize = true
             };
 
+            // Сведения о лицензии и ссылка на сайт перенесены в «О программе».
+            // В шапке они занимали место каждый сеанс, а нужны один раз.
+            pHeader.Controls.Add(pQat);
             pHeader.Controls.Add(lbTitle);
-            pHeader.Controls.Add(pBrand);
 
             // 2. НИЖНЯЯ ПАНЕЛЬ ДЕЙСТВИЙ (Dock = Bottom, Height = 56)
             var pBottom = new Panel
@@ -3066,24 +4335,19 @@ namespace NWD2DWG
             _btnConvert = StyleButton(new Button { Text = "▶  Конвертировать", Width = 210, Height = 36, Font = new Font("Segoe UI", 9.5f, FontStyle.Bold) }, true);
             _btnConvert.Click += (s, e) => StartConvert();
 
-            _btnCancel = StyleButton(new Button { Text = "Отмена", Width = 85, Height = 36, Enabled = false }, false);
+            _btnCancel = StyleButton(new Button { Text = "■  Отмена", Width = 85, Height = 36, Enabled = false }, false);
             _btnCancel.Click += (s, e) => { _cancel = true; _btnCancel.Enabled = false; _lbStatus.Text = "Отмена…"; };
 
-            _btnDiag = StyleButton(new Button { Text = "Диагностика", Width = 125, Height = 36 }, false);
+            _btnDiag = StyleButton(new Button { Text = "⚙  Диагностика", Width = 130, Height = 36 }, false);
             _btnDiag.Click += (s, e) => RunDiag();
 
-            _btnCleanTemp = StyleButton(new Button { Text = "Очистить Temp", Width = 150, Height = 36 }, false);
-            _btnCleanTemp.Click += (s, e) =>
-            {
-                long freed = NavisConverter.TempCleaner.CleanTempFiles(0);
-                MessageBox.Show(this, string.Format("Очищено {0:F1} МБ во временной папке (%TEMP%\\NWD2DWG).", freed / 1048576.0),
-                    "NWD2DWG TempCleaner", MessageBoxButtons.OK, MessageBoxIcon.Information);
-            };
+            _btnCleanTemp = StyleButton(new Button { Text = "⟲  Очистить Temp", Width = 150, Height = 36 }, false);
+            _btnCleanTemp.Click += (s, e) => CleanTemp();
 
-            _btnLogs = StyleButton(new Button { Text = "Логи", Width = 75, Height = 36 }, false);
+            _btnLogs = StyleButton(new Button { Text = "≡  Логи", Width = 85, Height = 36 }, false);
             _btnLogs.Click += (s, e) => OpenLogs();
 
-            _btnAbout = StyleButton(new Button { Text = "О программе", Width = 145, Height = 36 }, false);
+            _btnAbout = StyleButton(new Button { Text = "ⓘ  О программе", Width = 135, Height = 36 }, false);
             _btnAbout.Click += (s, e) => ShowAbout();
 
             pButtons.Controls.Add(_btnConvert);
@@ -3137,8 +4401,8 @@ namespace NWD2DWG
             // 3.1: Исходный файл
             var gbIn = new DarkPanelGroup
             {
-                Title = " Исходный файл Navisworks (.nwd / .nwc / .nwf) ",
-                Height = 74,
+                Title = "◆  Исходный файл Navisworks (.nwd / .nwc / .nwf)",
+                Height = 76,
                 Dock = DockStyle.Top,
                 Margin = new Padding(0, 0, 0, 6)
             };
@@ -3163,8 +4427,8 @@ namespace NWD2DWG
             // 3.2: Папка для сохранения
             var gbOut = new DarkPanelGroup
             {
-                Title = " Папка для сохранения (пусто = рядом с исходником) ",
-                Height = 74,
+                Title = "◆  Папка для сохранения (пусто = рядом с исходником)",
+                Height = 76,
                 Dock = DockStyle.Top,
                 Margin = new Padding(0, 0, 0, 6)
             };
@@ -3185,7 +4449,7 @@ namespace NWD2DWG
             // 3.3: Формат
             var gbFmt = new DarkPanelGroup
             {
-                Title = " Формат вывода ",
+                Title = "◆  Формат вывода геометрии и метаданных",
                 Height = 98,
                 Dock = DockStyle.Top,
                 Margin = new Padding(0, 0, 0, 6)
@@ -3197,9 +4461,12 @@ namespace NWD2DWG
                 RowCount = 2,
                 Padding = new Padding(4, 2, 4, 0)
             };
-            pFmtGrid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 38));
+            // Те же доли, что и у остальных панелей окна (36/32/32): иначе
+            // третий столбец форматов не совпадал по левому краю с колонками
+            // ниже, и это резало глаз.
+            pFmtGrid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 36));
             pFmtGrid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 32));
-            pFmtGrid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 30));
+            pFmtGrid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 32));
             pFmtGrid.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));
             pFmtGrid.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));
 
@@ -3217,7 +4484,7 @@ namespace NWD2DWG
                 }
                 else
                 {
-                    _cbShowAcad.ForeColor = Color.FromArgb(110, 118, 129);
+                    _cbShowAcad.ForeColor = ColTextMuted;
                     _cbShowAcad.AutoCheck = false;
                 }
             };
@@ -3231,7 +4498,7 @@ namespace NWD2DWG
             // 3.4: Параметры
             var gbOpt = new DarkPanelGroup
             {
-                Title = " Параметры конвертации ",
+                Title = "◆  Базовые параметры конвертации",
                 Height = 98,
                 Dock = DockStyle.Top,
                 Margin = new Padding(0, 0, 0, 6)
@@ -3256,7 +4523,7 @@ namespace NWD2DWG
             _cbColors = StyleCheckBox(new CheckBox { Text = "Переносить цвета элементов", Checked = false, Dock = DockStyle.Fill });
             _cbLayers = StyleCheckBox(new CheckBox { Text = "Отдельный слой на элемент", Checked = false, Dock = DockStyle.Fill });
             _cbShowAcad = StyleCheckBox(new CheckBox { Text = "Показывать окно AutoCAD", Checked = true, Dock = DockStyle.Fill });
-            _cbShowAcad.ForeColor = Color.FromArgb(110, 118, 129);
+            _cbShowAcad.ForeColor = ColTextMuted;
             _cbShowAcad.AutoCheck = false;
 
             pOptGrid.Controls.Add(_cbSplit, 0, 0);
@@ -3270,7 +4537,7 @@ namespace NWD2DWG
             // 3.5: Расширенные параметры v2.0
             var gbAdv = new DarkPanelGroup
             {
-                Title = " Расширенные параметры v2.0 ",
+                Title = "◆  Геометрическое ядро, Solid & LOD v2.0",
                 Height = 152,
                 Dock = DockStyle.Top,
                 Margin = new Padding(0, 0, 0, 6)
@@ -3310,7 +4577,7 @@ namespace NWD2DWG
                 SmallChange = 5,
                 LargeChange = 10,
                 Dock = DockStyle.Fill,
-                BackColor = ColBg,
+                BackColor = ColPanel,
                 Height = 30
             };
             _lbDecimateVal = new System.Windows.Forms.Label
@@ -3352,11 +4619,11 @@ namespace NWD2DWG
             {
                 Dock = DockStyle.Fill,
                 BackColor = ColInput,
-                ForeColor = Color.FromArgb(240, 246, 252),
+                ForeColor = ColText,
                 Font = new Font("Segoe UI", 9f),
                 BorderStyle = BorderStyle.FixedSingle
             };
-            _tbSets.GotFocus += (s, e) => { if (_tbSets.Text == "все (через запятую)") { _tbSets.Text = ""; _tbSets.ForeColor = Color.FromArgb(240, 246, 252); } };
+            _tbSets.GotFocus += (s, e) => { if (_tbSets.Text == "все (через запятую)") { _tbSets.Text = ""; _tbSets.ForeColor = ColText; } };
             _tbSets.LostFocus += (s, e) => { if (string.IsNullOrWhiteSpace(_tbSets.Text)) { _tbSets.Text = "все (через запятую)"; _tbSets.ForeColor = ColTextMuted; } };
             _tbSets.Text = "все (через запятую)";
             _tbSets.ForeColor = ColTextMuted;
@@ -3370,7 +4637,7 @@ namespace NWD2DWG
             // 3.6: Инженерия & BIM v3.0
             var gbV3 = new DarkPanelGroup
             {
-                Title = " Инженерия & BIM v3.0 ",
+                Title = "◆  Инженерия, Оси & Координация v3.0",
                 Height = 98,
                 Dock = DockStyle.Top,
                 Margin = new Padding(0, 0, 0, 6)
@@ -3390,12 +4657,13 @@ namespace NWD2DWG
             pV3Grid.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));
 
             _cbGeoShift = StyleCheckBox(new CheckBox { Text = "Сдвиг к нулю (0,0,0) + .wld", Checked = true, Dock = DockStyle.Fill });
-            _cbGrids = StyleCheckBox(new CheckBox { Text = "Оси и уровни (_GRIDS)", Checked = true, Dock = DockStyle.Fill });
+            _cbGrids = StyleCheckBox(new CheckBox { Text = "Уровни этажей (_LEVELS)", Checked = true, Dock = DockStyle.Fill });
+            _tips.SetToolTip(_cbGrids, "Выгружаются высотные отметки этажей. Геометрию координационных осей публичный API Navisworks не отдаёт.");
             _cbPipeTrace = StyleCheckBox(new CheckBox { Text = "Оси труб (DN/L)", Checked = false, Dock = DockStyle.Fill });
             _cbBoq = StyleCheckBox(new CheckBox { Text = "Смета ВОР в Excel/CSV", Checked = false, Dock = DockStyle.Fill });
             _cbBcf = StyleCheckBox(new CheckBox { Text = "Коллизии BCF 2.1", Checked = false, Dock = DockStyle.Fill });
+            _tips.SetToolTip(_cbBcf, "Выгружает сохранённые проверки Clash Detective в пакет BCF 2.1. Если проверок в модели нет, программа сообщает об этом в журнале.");
             _cbAnonymize = StyleCheckBox(new CheckBox { Text = "Анонимизация свойств", Checked = false, Dock = DockStyle.Fill });
-
             pV3Grid.Controls.Add(_cbGeoShift, 0, 0);
             pV3Grid.Controls.Add(_cbGrids, 1, 0);
             pV3Grid.Controls.Add(_cbPipeTrace, 2, 0);
@@ -3404,7 +4672,62 @@ namespace NWD2DWG
             pV3Grid.Controls.Add(_cbAnonymize, 2, 1);
             gbV3.Controls.Add(pV3Grid);
 
-            // 3.7: Лог
+            // 3.7: Экспертиза, EPC & 4D (v3.1 – v3.5)
+            var gbV4 = new DarkPanelGroup
+            {
+                Title = "◆  Экспертиза, EPC & 4D (v3.1 – v3.5)",
+                Height = 148,
+                Dock = DockStyle.Top,
+                Margin = new Padding(0, 0, 0, 6)
+            };
+
+            var pV4Grid = new TableLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                ColumnCount = 3,
+                RowCount = 4,
+                Padding = new Padding(4, 2, 4, 0)
+            };
+            pV4Grid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 36));
+            pV4Grid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 32));
+            pV4Grid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 32));
+            pV4Grid.RowStyles.Add(new RowStyle(SizeType.Absolute, 28));
+            pV4Grid.RowStyles.Add(new RowStyle(SizeType.Absolute, 28));
+            pV4Grid.RowStyles.Add(new RowStyle(SizeType.Absolute, 28));
+            pV4Grid.RowStyles.Add(new RowStyle(SizeType.Absolute, 28));
+
+            _cbClashCluster = StyleCheckBox(new CheckBox { Text = "Кластеризация коллизий (DBSCAN)", Checked = false, Dock = DockStyle.Fill });
+            _tips.SetToolTip(_cbClashCluster, "Группирует коллизии Clash Detective по трассам, отсекая дубли. Радиус ε задаётся в параметрах модулей.");
+            _cbSectionPlan = StyleCheckBox(new CheckBox { Text = "2D поэтажный план (Z-срез)", Checked = false, Dock = DockStyle.Fill });
+            _cbCadPurge = StyleCheckBox(new CheckBox { Text = "Глубокая чистка DXF (Purge)", Checked = false, Dock = DockStyle.Fill });
+            _cbPenetrations = StyleCheckBox(new CheckBox { Text = "Авторасстановка гильз (DN+50)", Checked = false, Dock = DockStyle.Fill });
+            _cbClearance = StyleCheckBox(new CheckBox { Text = "Контроль высоты проходов (СП 118)", Checked = false, Dock = DockStyle.Fill });
+            _cbSteelMatcher = StyleCheckBox(new CheckBox { Text = "Сортамент стали ГОСТ (КМ/КМД)", Checked = false, Dock = DockStyle.Fill });
+            _cbCog = StyleCheckBox(new CheckBox { Text = "Центр масс блока (CoG Гаусс)", Checked = false, Dock = DockStyle.Fill });
+            _cbIso = StyleCheckBox(new CheckBox { Text = "Изометрия трубопроводов ГОСТ", Checked = false, Dock = DockStyle.Fill });
+            _cbSchedule4D = StyleCheckBox(new CheckBox { Text = "4D статус по графику", Checked = false, Dock = DockStyle.Fill });
+            _tips.SetToolTip(_cbSchedule4D, "Берёт задачи из TimeLiner модели (или из файла MS Project / CSV по ключу --schedule) и считает отставание на дату среза.");
+            _cbShrinkwrap = StyleCheckBox(new CheckBox { Text = "Защита IP (OBB-оболочки)", Checked = false, Dock = DockStyle.Fill });
+            _cbRoomFinish = StyleCheckBox(new CheckBox { Text = "Ведомость отделки ГОСТ 21.501", Checked = false, Dock = DockStyle.Fill });
+            _tips.SetToolTip(_cbRoomFinish, "Помещения определяются по замкнутым контурам горизонтального среза. Пороги площади задаются в параметрах модулей.");
+            pV4Grid.Controls.Add(_cbClashCluster, 0, 0);
+            pV4Grid.Controls.Add(_cbSectionPlan, 1, 0);
+            pV4Grid.Controls.Add(_cbCadPurge, 2, 0);
+            pV4Grid.Controls.Add(_cbPenetrations, 0, 1);
+            pV4Grid.Controls.Add(_cbClearance, 1, 1);
+            pV4Grid.Controls.Add(_cbSteelMatcher, 2, 1);
+            pV4Grid.Controls.Add(_cbCog, 0, 2);
+            pV4Grid.Controls.Add(_cbIso, 1, 2);
+            pV4Grid.Controls.Add(_cbSchedule4D, 2, 2);
+            var btnModuleSettings = StyleButton(new Button { Text = "⚙  Параметры модулей…", Dock = DockStyle.Fill, Height = 26 }, false);
+            btnModuleSettings.Click += (s, e) => OpenModuleSettings();
+
+            pV4Grid.Controls.Add(_cbShrinkwrap, 0, 3);
+            pV4Grid.Controls.Add(_cbRoomFinish, 1, 3);
+            pV4Grid.Controls.Add(btnModuleSettings, 2, 3);
+            gbV4.Controls.Add(pV4Grid);
+
+            // 3.8: Лог
             _tbLog = new TextBox
             {
                 Multiline = true,
@@ -3413,11 +4736,12 @@ namespace NWD2DWG
                 Dock = DockStyle.Fill,
                 Font = new Font("Consolas", 9f),
                 BackColor = ColInput,
-                ForeColor = Color.FromArgb(201, 209, 217),
+                ForeColor = Color.FromArgb(220, 227, 235),
                 BorderStyle = BorderStyle.FixedSingle
             };
 
             pMain.Controls.Add(_tbLog);
+            pMain.Controls.Add(gbV4);
             pMain.Controls.Add(gbV3);
             pMain.Controls.Add(gbAdv);
             pMain.Controls.Add(gbOpt);
@@ -3428,7 +4752,7 @@ namespace NWD2DWG
             _tbLog.BringToFront();
 
             Log.AddSink(AppendLog);
-            Log.Write("NWD2DWG v3.0 — запущен. Разработчик: BaidurovLabs (https://baidurovlabs.ru)");
+            Log.Write("NWD2DWG v3.5 — запущен. Разработчик: BaidurovLabs (https://baidurovlabs.ru)");
             Log.Write("Лицензия: GNU General Public License v3.0 (Свободное программное обеспечение)");
             Log.Write("Перетащите .nwd файл или папку в окно программы.");
 
@@ -3452,6 +4776,36 @@ namespace NWD2DWG
             };
         }
 
+        static Button CreateQatButton(string text, string toolTip, EventHandler onClick)
+        {
+            var btn = new Button
+            {
+                Text = text,
+                Width = 28,
+                Height = 28,
+                FlatStyle = FlatStyle.Flat,
+                BackColor = Color.Transparent,
+                ForeColor = ColTextSecondary,
+                Cursor = Cursors.Hand,
+                Font = new Font("Segoe UI", 9.5f),
+                Margin = new Padding(1, 0, 1, 0)
+            };
+            btn.FlatAppearance.BorderSize = 0;
+            btn.FlatAppearance.MouseOverBackColor = ColHoverBg;
+            btn.FlatAppearance.MouseDownBackColor = ColChecked;
+            if (onClick != null) btn.Click += onClick;
+            var tt = new ToolTip();
+            tt.SetToolTip(btn, toolTip);
+            return btn;
+        }
+
+        void CleanTemp()
+        {
+            long freed = NavisConverter.TempCleaner.CleanTempFiles(0);
+            MessageBox.Show(this, string.Format("Очищено {0:F1} МБ во временной папке (%TEMP%\\NWD2DWG).", freed / 1048576.0),
+                "NWD2DWG TempCleaner", MessageBoxButtons.OK, MessageBoxIcon.Information);
+        }
+
         public static Form CreateLicenseForm()
         {
             var dlg = new Form
@@ -3467,6 +4821,7 @@ namespace NWD2DWG
                 MaximizeBox = false,
                 MinimizeBox = false
             };
+            dlg.HandleCreated += (s, e) => ApplyDwmDarkTheme(dlg);
 
             var pRoot = new TableLayoutPanel
             {
@@ -3586,13 +4941,35 @@ namespace NWD2DWG
             }
         }
 
+        /// <summary>Ссылка в стиле окна. url = null — обработчик вешается снаружи.</summary>
+        static LinkLabel AboutLink(string text, string url)
+        {
+            var lnk = new LinkLabel
+            {
+                Text = text,
+                LinkColor = Color.FromArgb(88, 166, 255),
+                ActiveLinkColor = Color.FromArgb(165, 214, 255),
+                VisitedLinkColor = Color.FromArgb(88, 166, 255),
+                Font = new Font("Segoe UI", 9f),
+                AutoSize = true,
+                Margin = new Padding(0, 6, 18, 0)
+            };
+            if (!string.IsNullOrEmpty(url))
+                lnk.LinkClicked += (s, e) =>
+                {
+                    try { Process.Start(new ProcessStartInfo(url) { UseShellExecute = true }); }
+                    catch { }
+                };
+            return lnk;
+        }
+
         public static Form CreateAboutForm()
         {
             var dlg = new Form
             {
                 Text = "О программе NWD2DWG",
                 Width = 720,
-                Height = 380,
+                Height = 400,
                 StartPosition = FormStartPosition.CenterScreen,
                 BackColor = ColBg,
                 ForeColor = ColText,
@@ -3601,6 +4978,7 @@ namespace NWD2DWG
                 MaximizeBox = false,
                 MinimizeBox = false
             };
+            dlg.HandleCreated += (s, e) => ApplyDwmDarkTheme(dlg);
 
             var pRoot = new TableLayoutPanel
             {
@@ -3618,7 +4996,7 @@ namespace NWD2DWG
             var pTop = new Panel { Dock = DockStyle.Fill, Margin = new Padding(0) };
             var lbHead = new System.Windows.Forms.Label
             {
-                Text = "NWD2DWG v3.0",
+                Text = "NWD2DWG v3.5",
                 Font = new Font("Segoe UI", 12f, FontStyle.Bold),
                 ForeColor = ColAccent,
                 Location = new Point(0, 2),
@@ -3626,7 +5004,7 @@ namespace NWD2DWG
             };
             var lbSub = new System.Windows.Forms.Label
             {
-                Text = "BIM-конвертер моделей Autodesk Navisworks в AutoCAD DWG/DXF, glTF и IFC",
+                Text = "BIM-конвертер и экосистема прямого извлечения геометрии Autodesk Navisworks",
                 Location = new Point(0, 26),
                 ForeColor = ColTextMuted,
                 AutoSize = true
@@ -3657,9 +5035,9 @@ namespace NWD2DWG
             tbAbout.Text = "Программа предназначена для прямого извлечения и конвертации 3D-геометрии,\r\n" +
                            "координационных сеток, уровней и метаданных из файлов Navisworks (.NWD, .NWC, .NWF)\r\n" +
                            "в форматы AutoCAD (.DWG, .DXF), glTF 2.0 / GLB и IFC 2x3.\r\n\r\n" +
-                           "Версия: 3.0 (Engineering & BIM Edition)\r\n" +
+                           "Версия: 3.5 (Engineering, EPC, Coordination & 4D Edition)\r\n" +
                            "Лицензия: GNU General Public License v3.0 (GPLv3)\r\n" +
-                           "Автор: Baidurov Pavel\r\n" +
+                           "Автор: Baidurov Pavel (baidurovlabs.ru)\r\n" +
                            "Совместимость: Autodesk Navisworks 2020–2026, AutoCAD 2018–2026";
             pBorder.Controls.Add(tbAbout);
 
@@ -3673,23 +5051,46 @@ namespace NWD2DWG
             pBot.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
             pBot.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 120));
 
-            var lnkGit = new LinkLabel
+            // Три ссылки в одну строку. Текст лицензии обязан быть доступен из
+            // интерфейса — GPL требует передавать его вместе с программой,
+            // а других входов в него после разгрузки шапки не осталось.
+            var pLinks = new FlowLayoutPanel
             {
-                Text = "GitHub: https://github.com/AnT1pal/NWD2DWG",
-                LinkColor = Color.FromArgb(88, 166, 255),
-                ActiveLinkColor = Color.FromArgb(165, 214, 255),
-                VisitedLinkColor = Color.FromArgb(88, 166, 255),
-                Font = new Font("Segoe UI", 9f),
+                Dock = DockStyle.Fill,
+                FlowDirection = FlowDirection.LeftToRight,
+                WrapContents = false,
                 AutoSize = true,
-                Anchor = AnchorStyles.Left,
-                Margin = new Padding(0, 6, 0, 0)
+                Margin = new Padding(0, 4, 0, 0)
             };
-            lnkGit.LinkClicked += (s, e) => { try { Process.Start(new ProcessStartInfo("https://github.com/AnT1pal/NWD2DWG") { UseShellExecute = true }); } catch { } };
+
+            var lnkSite = AboutLink("baidurovlabs.ru", "https://baidurovlabs.ru");
+            // Исходники лежат в двух местах: зарубежном и российском. Второй
+            // указан не для порядка — в закрытом контуре до GitHub может не
+            // быть доступа, и тогда это единственный работающий адрес.
+            var lnkGit = AboutLink("GitHub", "https://github.com/AnT1pal/NWD2DWG");
+            var lnkSc = AboutLink("SourceCraft", "https://sourcecraft.dev/antipal/nwd2dwg");
+
+            var lnkLic = AboutLink("Лицензия GNU GPL v3", null);
+            lnkLic.LinkColor = ColTextMuted;
+            lnkLic.VisitedLinkColor = ColTextMuted;
+            lnkLic.LinkClicked += (s, e) =>
+            {
+                using (var lic = CreateLicenseForm())
+                {
+                    lic.StartPosition = FormStartPosition.CenterParent;
+                    lic.ShowDialog(dlg);
+                }
+            };
+
+            pLinks.Controls.Add(lnkSite);
+            pLinks.Controls.Add(lnkGit);
+            pLinks.Controls.Add(lnkSc);
+            pLinks.Controls.Add(lnkLic);
 
             var btnClose = StyleButton(new Button { Text = "Закрыть", Width = 110, Height = 34, DialogResult = DialogResult.OK, TabStop = true }, true);
             btnClose.Anchor = AnchorStyles.Right;
 
-            pBot.Controls.Add(lnkGit, 0, 0);
+            pBot.Controls.Add(pLinks, 0, 0);
             pBot.Controls.Add(btnClose, 1, 0);
 
             pRoot.Controls.Add(pTop, 0, 0);
@@ -3711,25 +5112,38 @@ namespace NWD2DWG
             }
         }
 
+        void OpenModuleSettings()
+        {
+            using (var dlg = new ModuleSettingsDialog(_advConfig, _outProfile))
+            {
+                if (dlg.ShowDialog(this) == DialogResult.OK)
+                {
+                    _advConfig.Save();
+                    _outProfile.Save();
+                    Log.Write("Параметры модулей и профиль выдачи сохранены.");
+                }
+            }
+        }
+
         static Panel CreateInputPanel(TextBox tb)
         {
             var pBorder = new Panel
             {
                 Dock = DockStyle.Fill,
-                BackColor = Color.FromArgb(70, 82, 100),
+                BackColor = ColBorder,
                 Padding = new Padding(1),
                 Height = 30
             };
             var pInner = new Panel
             {
                 Dock = DockStyle.Fill,
-                BackColor = Color.FromArgb(14, 18, 24),
+                BackColor = ColInput,
                 Padding = new Padding(8, 4, 8, 4)
             };
             tb.BorderStyle = BorderStyle.None;
-            tb.BackColor = Color.FromArgb(14, 18, 24);
-            tb.ForeColor = Color.FromArgb(240, 246, 252);
-            tb.Font = new Font("Segoe UI", 10f);
+            tb.BackColor = ColInput;
+            tb.ForeColor = ColText;
+            tb.Font = new Font("Segoe UI", 9.5f);
             tb.Dock = DockStyle.Fill;
             pInner.Controls.Add(tb);
             pBorder.Controls.Add(pInner);
@@ -3740,10 +5154,13 @@ namespace NWD2DWG
         {
             btn.FlatStyle = FlatStyle.Flat;
             btn.FlatAppearance.BorderSize = 1;
-            btn.FlatAppearance.BorderColor = primary ? Color.FromArgb(0, 150, 255) : ColBorder;
+            btn.FlatAppearance.BorderColor = primary ? ColAccent : ColBorder;
+            btn.FlatAppearance.MouseOverBackColor = primary ? ColBtnPrimaryHover : ColBtnSecHover;
+            btn.FlatAppearance.MouseDownBackColor = primary ? ColChecked : ColHoverBg;
             btn.BackColor = primary ? ColBtnPrimary : ColBtnSec;
             btn.ForeColor = Color.White;
             btn.Cursor = Cursors.Hand;
+            btn.Font = new Font("Segoe UI", 9f, primary ? FontStyle.Bold : FontStyle.Regular);
             btn.Margin = new Padding(3, 2, 3, 2);
             return btn;
         }
@@ -3840,6 +5257,31 @@ namespace NWD2DWG
             catch { }
         }
 
+        // Маршалинг в UI-поток. Конвертация больше не выполняется в потоке
+        // сообщений, поэтому любое обращение к контролам идёт только через них.
+        void UiPost(Action a)
+        {
+            try { if (IsHandleCreated && !IsDisposed) BeginInvoke(a); } catch { }
+        }
+
+        void UiSend(Action a)
+        {
+            try { if (IsHandleCreated && !IsDisposed) Invoke(a); } catch { }
+        }
+
+        protected override void OnFormClosing(FormClosingEventArgs e)
+        {
+            if (_running)
+            {
+                var r = MessageBox.Show(this,
+                    "Конвертация ещё выполняется. Прервать и закрыть программу?",
+                    "NWD2DWG", MessageBoxButtons.YesNo, MessageBoxIcon.Warning);
+                if (r != DialogResult.Yes) { e.Cancel = true; return; }
+                _cancel = true;
+            }
+            base.OnFormClosing(e);
+        }
+
         void StartConvert()
         {
             if (_running) return;
@@ -3858,13 +5300,25 @@ namespace NWD2DWG
             _btnDiag.Enabled = false;
             _pb.Value = 0;
 
-            string logFile = Path.Combine(Path.GetTempPath(), "NWD2DWG", "convert_" + DateTime.Now.ToString("yyyyMMdd_HHmmss") + ".log");
+            string logFile = Path.Combine(Path.GetTempPath(), "NWD2DWG",
+                "convert_" + DateTime.Now.ToString("yyyyMMdd_HHmmss_fff") + ".log");
             Log.SetFile(logFile);
             Log.Write("=== Конвертация начата ===");
             Log.Write("файлов к обработке: " + files.Count);
 
-            var cts = new CancellationTokenSource();
+            // Отдельный STA-поток: раньше конвертация шла прямо в потоке UI, окно
+            // висело в "Не отвечает", а Отмена работала только благодаря DoEvents
+            // внутри колбэка прогресса. STA обязателен для COM-автоматизации
+            // Navisworks и AutoCAD, поэтому не Task.Run (там пул с MTA).
+            var worker = new Thread(() => ConvertWorker(opts, files, logFile));
+            worker.IsBackground = true;
+            worker.SetApartmentState(ApartmentState.STA);
+            worker.Name = "NWD2DWG.Convert";
+            worker.Start();
+        }
 
+        void ConvertWorker(AppOptions opts, List<string> files, string logFile)
+        {
             try
             {
                 int done = 0;
@@ -3886,14 +5340,14 @@ namespace NWD2DWG
                     string outPath = Path.Combine(outDir, Path.GetFileNameWithoutExtension(file) + ext);
 
                     Log.Write("--- файл " + (done + 1) + "/" + files.Count + ": " + file + " -> " + outPath);
-                    _lbStatus.Text = "Открытие Navisworks…";
+                    UiPost(() => _lbStatus.Text = "Открытие Navisworks…");
 
                     opts.Input = file;
                     try
                     {
                         ConvertStats st = NavisConverter.ConvertFile(opts, file, outPath,
-                            s => _lbStatus.Text = s,
-                            d => { _pb.Value = (int)(d * 1000); Application.DoEvents(); },
+                            s => UiPost(() => _lbStatus.Text = s),
+                            d => UiPost(() => _pb.Value = Math.Max(0, Math.Min(1000, (int)(d * 1000)))),
                             () => _cancel);
                         Log.Write(string.Format("итог: треугольников {0}, элементов {1}, {2:F1} МБ, {3}",
                             st.Triangles, st.Items, st.OutputBytes / 1048576.0, st.Elapsed));
@@ -3908,24 +5362,32 @@ namespace NWD2DWG
                     {
                         Log.Write("ОШИБКА файла " + file + ": " + ex);
                         try { if (File.Exists(outPath) && new FileInfo(outPath).Length < 100) File.Delete(outPath); } catch { }
-                        MessageBox.Show(this,
-                            "Не удалось конвертировать:\n" + Path.GetFileName(file) + "\n\n" + ex.Message +
-                            "\n\nПодробности: " + logFile,
-                            "NWD2DWG", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                        string msg = "Не удалось конвертировать:\n" + Path.GetFileName(file) + "\n\n" + ex.Message +
+                                     "\n\nПодробности: " + logFile;
+                        UiSend(() => MessageBox.Show(this, msg, "NWD2DWG", MessageBoxButtons.OK, MessageBoxIcon.Error));
                     }
                     done++;
                 }
 
-                _lbStatus.Text = _cancel ? "Отменено." : "Готово.";
+                bool cancelled = _cancel;
+                UiPost(() => _lbStatus.Text = cancelled ? "Отменено." : "Готово.");
                 Log.Write("=== Конвертация завершена ===");
+                Log.Flush();
+            }
+            catch (Exception ex)
+            {
+                Log.Write("КРИТИЧЕСКАЯ ОШИБКА конвейера: " + ex);
                 Log.Flush();
             }
             finally
             {
-                _running = false;
-                _btnConvert.Enabled = true;
-                _btnCancel.Enabled = false;
-                _btnDiag.Enabled = true;
+                UiPost(() =>
+                {
+                    _running = false;
+                    _btnConvert.Enabled = true;
+                    _btnCancel.Enabled = false;
+                    _btnDiag.Enabled = true;
+                });
             }
         }
 
@@ -3959,7 +5421,20 @@ namespace NWD2DWG
                 TracePipes = _cbPipeTrace.Checked,
                 ExportBoq = _cbBoq.Checked,
                 ExportBcf = _cbBcf.Checked,
-                Anonymize = _cbAnonymize.Checked
+                Anonymize = _cbAnonymize.Checked,
+                ClusterClashes = _cbClashCluster.Checked,
+                SectionPlan = _cbSectionPlan.Checked,
+                PurgeDxf = _cbCadPurge.Checked,
+                BuildPenetrations = _cbPenetrations.Checked,
+                ValidateClearance = _cbClearance.Checked,
+                MatchSteel = _cbSteelMatcher.Checked,
+                CalcCog = _cbCog.Checked,
+                GenerateIso = _cbIso.Checked,
+                MapSchedule4D = _cbSchedule4D.Checked,
+                Shrinkwrap = _cbShrinkwrap.Checked,
+                RoomFinish = _cbRoomFinish.Checked,
+                AdvConfig = _advConfig,
+                OutProfile = _outProfile
             };
         }
 

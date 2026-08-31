@@ -24,6 +24,16 @@ namespace NWD2DWG.Plugin
                 m44 = d * d;
             }
 
+            public SymmetricMatrix Scaled(double k)
+            {
+                var r = new SymmetricMatrix();
+                r.m11 = m11 * k; r.m12 = m12 * k; r.m13 = m13 * k; r.m14 = m14 * k;
+                r.m22 = m22 * k; r.m23 = m23 * k; r.m24 = m24 * k;
+                r.m33 = m33 * k; r.m34 = m34 * k;
+                r.m44 = m44 * k;
+                return r;
+            }
+
             public void Add(SymmetricMatrix n)
             {
                 m11 += n.m11; m12 += n.m12; m13 += n.m13; m14 += n.m14;
@@ -96,6 +106,9 @@ namespace NWD2DWG.Plugin
             public int v1, v2;
             public double error;
             public double tx, ty, tz;
+            // версии вершин на момент расчёта ошибки: если вершина с тех пор
+            // сдвинулась, запись в куче устарела и ошибку надо пересчитать
+            public int ver1, ver2;
 
             public Edge(int v1, int v2)
             {
@@ -119,6 +132,133 @@ namespace NWD2DWG.Plugin
             {
                 return (v1 * 397) ^ v2;
             }
+        }
+
+        // Двоичная мин-куча по ошибке. Раньше рёбра лежали в отсортированном
+        // List и новые вставлялись через List.Insert — O(N) memmove на каждое
+        // схлопывание, то есть O(N^2) на прогон. Плюс вставка перед курсором
+        // сдвигала список под ним и ломала порядок обхода.
+        private class EdgeHeap
+        {
+            private readonly List<Edge> _h;
+            public EdgeHeap(int capacity) { _h = new List<Edge>(capacity); }
+            public int Count { get { return _h.Count; } }
+
+            public void Push(Edge e)
+            {
+                _h.Add(e);
+                int i = _h.Count - 1;
+                while (i > 0)
+                {
+                    int p = (i - 1) / 2;
+                    if (_h[p].error <= _h[i].error) break;
+                    Edge tmp = _h[p]; _h[p] = _h[i]; _h[i] = tmp;
+                    i = p;
+                }
+            }
+
+            public Edge Pop()
+            {
+                if (_h.Count == 0) return null;
+                Edge top = _h[0];
+                Edge last = _h[_h.Count - 1];
+                _h.RemoveAt(_h.Count - 1);
+                if (_h.Count > 0)
+                {
+                    _h[0] = last;
+                    int i = 0;
+                    while (true)
+                    {
+                        int l = 2 * i + 1, r = l + 1, s = i;
+                        if (l < _h.Count && _h[l].error < _h[s].error) s = l;
+                        if (r < _h.Count && _h[r].error < _h[s].error) s = r;
+                        if (s == i) break;
+                        Edge tmp = _h[s]; _h[s] = _h[i]; _h[i] = tmp;
+                        i = s;
+                    }
+                }
+                return top;
+            }
+        }
+
+        private static void CountEdge(Dictionary<long, int> map, int a, int b)
+        {
+            long k = EdgeKey(a, b);
+            int c;
+            map[k] = map.TryGetValue(k, out c) ? c + 1 : 1;
+        }
+
+        private static long EdgeKey(int a, int b)
+        {
+            return a < b ? ((long)a << 32) | (uint)b : ((long)b << 32) | (uint)a;
+        }
+
+        // Для ребра, принадлежащего ровно одной грани, добавляем квадрику
+        // плоскости, перпендикулярной грани и содержащей это ребро.
+        private static void AddBoundaryQuadric(List<Vertex> vertices,
+            Dictionary<long, int> edgeFaces, Face f, int a, int b, double weight)
+        {
+            int cnt;
+            if (!edgeFaces.TryGetValue(EdgeKey(a, b), out cnt) || cnt != 1) return;
+
+            Vertex va = vertices[a], vb = vertices[b];
+            double ex = vb.x - va.x, ey = vb.y - va.y, ez = vb.z - va.z;
+            double el = Math.Sqrt(ex * ex + ey * ey + ez * ez);
+            if (el < 1e-12) return;
+            ex /= el; ey /= el; ez /= el;
+
+            // n = edge x faceNormal
+            double nx = ey * f.normal[2] - ez * f.normal[1];
+            double ny = ez * f.normal[0] - ex * f.normal[2];
+            double nz = ex * f.normal[1] - ey * f.normal[0];
+            double nl = Math.Sqrt(nx * nx + ny * ny + nz * nz);
+            if (nl < 1e-12) return;
+            nx /= nl; ny /= nl; nz /= nl;
+
+            double d = -(nx * va.x + ny * va.y + nz * va.z);
+            SymmetricMatrix sm = new SymmetricMatrix(nx, ny, nz, d).Scaled(weight);
+            va.q.Add(sm);
+            vb.q.Add(sm);
+        }
+
+        // true, если после переноса v2 в точку (tx,ty,tz) хоть одна уцелевшая
+        // грань поменяет направление нормали (складка / вывернутый треугольник)
+        private static bool WouldFlip(List<Vertex> vertices, List<Face> faces,
+            Vertex v1, Vertex v2, double tx, double ty, double tz)
+        {
+            foreach (var set in new[] { v1.faces, v2.faces })
+            {
+                foreach (int fId in set)
+                {
+                    Face f = faces[fId];
+                    if (f.removed) continue;
+                    // грани, содержащие оба конца, всё равно схлопнутся
+                    if (f.HasVertex(v1.id) && f.HasVertex(v2.id)) continue;
+
+                    double[] p0 = MovedPos(vertices[f.v0], v1, v2, tx, ty, tz);
+                    double[] p1 = MovedPos(vertices[f.v1], v1, v2, tx, ty, tz);
+                    double[] p2 = MovedPos(vertices[f.v2], v1, v2, tx, ty, tz);
+
+                    double ux = p1[0] - p0[0], uy = p1[1] - p0[1], uz = p1[2] - p0[2];
+                    double vx = p2[0] - p0[0], vy = p2[1] - p0[1], vz = p2[2] - p0[2];
+                    double nx = uy * vz - uz * vy;
+                    double ny = uz * vx - ux * vz;
+                    double nz = ux * vy - uy * vx;
+                    double nl = Math.Sqrt(nx * nx + ny * ny + nz * nz);
+                    if (nl < 1e-12) return true; // грань выродилась в отрезок
+
+                    double dot = (nx * f.normal[0] + ny * f.normal[1] + nz * f.normal[2]) / nl;
+                    if (dot < 0.1) return true;
+                }
+            }
+            return false;
+        }
+
+        private static double[] MovedPos(Vertex v, Vertex v1, Vertex v2,
+            double tx, double ty, double tz)
+        {
+            if (v.id == v1.id || v.id == v2.id) return new[] { tx, ty, tz };
+            return new[] { v.x, v.y, v.z };
         }
 
         private static double VertexError(SymmetricMatrix q, double x, double y, double z)
@@ -154,13 +294,16 @@ namespace NWD2DWG.Plugin
 
         public static void Decimate(ref List<double> verts, ref List<int> quads, double targetRatio)
         {
+            Decimate(ref verts, ref quads, targetRatio, 1000.0, true);
+        }
+
+        public static void Decimate(ref List<double> verts, ref List<int> quads,
+                                    double targetRatio, double boundaryWeight, bool preventFlips)
+        {
             if (targetRatio <= 0.0 || quads.Count == 0 || verts.Count == 0) return;
-            if (targetRatio >= 1.0)
-            {
-                verts.Clear();
-                quads.Clear();
-                return;
-            }
+            // Раньше ratio >= 1 молча стирал всю геометрию. Ограничиваем
+            // максимальное сжатие вместо уничтожения меша.
+            if (targetRatio > 0.95) targetRatio = 0.95;
 
             int initialFaceCount = quads.Count / 4;
             int targetFaceCount = (int)(initialFaceCount * (1.0 - targetRatio));
@@ -223,39 +366,74 @@ namespace NWD2DWG.Plugin
                 v2.q.Add(sm);
             }
 
-            // 3. Формирование списка ребер и расчет их ошибок
-            List<Edge> edges = new List<Edge>();
+            // 2б. Квадрики граничных рёбер.
+            // Navisworks отдаёт открытые оболочки, а не замкнутые тела. Без
+            // закрепления границы QEM утягивает края внутрь и объект усыхает.
+            var edgeFaces = new Dictionary<long, int>(faces.Count * 2);
+            foreach (Face bf in faces)
+            {
+                CountEdge(edgeFaces, bf.v0, bf.v1);
+                CountEdge(edgeFaces, bf.v1, bf.v2);
+                CountEdge(edgeFaces, bf.v2, bf.v0);
+            }
+            if (boundaryWeight > 0)
+            {
+                foreach (Face bf in faces)
+                {
+                    AddBoundaryQuadric(vertices, edgeFaces, bf, bf.v0, bf.v1, boundaryWeight);
+                    AddBoundaryQuadric(vertices, edgeFaces, bf, bf.v1, bf.v2, boundaryWeight);
+                    AddBoundaryQuadric(vertices, edgeFaces, bf, bf.v2, bf.v0, boundaryWeight);
+                }
+            }
+
+            // 3. Формирование кучи рёбер по возрастанию ошибки
+            int[] vver = new int[vertices.Count];
+            var heap = new EdgeHeap(vertices.Count * 3);
             for (int i = 0; i < vertices.Count; i++)
             {
-                Vertex v1 = vertices[i];
-                foreach (int adjId in v1.adjacentVertices)
+                Vertex vi = vertices[i];
+                foreach (int adjId in vi.adjacentVertices)
                 {
-                    if (adjId > i) // Добавляем каждое ребро только один раз
+                    if (adjId > i) // каждое ребро добавляем один раз
                     {
-                        Edge e = new Edge(i, adjId);
-                        e.error = CalculateError(v1, vertices[adjId], out e.tx, out e.ty, out e.tz);
-                        edges.Add(e);
+                        Edge e0 = new Edge(i, adjId);
+                        e0.error = CalculateError(vi, vertices[adjId], out e0.tx, out e0.ty, out e0.tz);
+                        e0.ver1 = vver[e0.v1]; e0.ver2 = vver[e0.v2];
+                        heap.Push(e0);
                     }
                 }
             }
-            edges.Sort();
 
             // 4. Схлопывание ребер (Decimation)
             int currentFaceCount = faces.Count;
-            int edgeIndex = 0;
 
-            while (currentFaceCount > targetFaceCount && edgeIndex < edges.Count)
+            while (currentFaceCount > targetFaceCount && heap.Count > 0)
             {
-                Edge e = edges[edgeIndex++];
+                Edge e = heap.Pop();
                 Vertex v1 = vertices[e.v1];
                 Vertex v2 = vertices[e.v2];
 
                 if (v1.removed || v2.removed) continue;
 
+                // Запись устарела (одна из вершин уже двигалась) — пересчитываем
+                // и возвращаем в кучу, чтобы не нарушать порядок по ошибке
+                if (e.ver1 != vver[e.v1] || e.ver2 != vver[e.v2])
+                {
+                    e.error = CalculateError(v1, v2, out e.tx, out e.ty, out e.tz);
+                    e.ver1 = vver[e.v1]; e.ver2 = vver[e.v2];
+                    heap.Push(e);
+                    continue;
+                }
+
+                // Защита от выворачивания: если уцелевшая грань меняет
+                // направление нормали, схлопывание даёт складку
+                if (preventFlips && WouldFlip(vertices, faces, v1, v2, e.tx, e.ty, e.tz)) continue;
+
                 // Схлопываем v2 в v1
                 v1.x = e.tx; v1.y = e.ty; v1.z = e.tz;
                 v1.q.Add(v2.q);
                 v2.removed = true;
+                vver[v1.id]++;
 
                 // Обновляем лица
                 List<int> facesToRemove = new List<int>();
@@ -278,11 +456,9 @@ namespace NWD2DWG.Plugin
                         v1.faces.Add(f.id);
                     }
                 }
-                
-                foreach (int fId in facesToRemove)
-                {
-                    v1.faces.Remove(fId);
-                }
+
+                foreach (int fId in facesToRemove) v1.faces.Remove(fId);
+                v2.faces.Clear();
 
                 // Обновляем связи графа
                 v1.adjacentVertices.Remove(v2.id);
@@ -293,16 +469,16 @@ namespace NWD2DWG.Plugin
                         vertices[adjId].adjacentVertices.Remove(v2.id);
                         vertices[adjId].adjacentVertices.Add(v1.id);
                         v1.adjacentVertices.Add(adjId);
-                        
-                        // Добавляем новые ребра для переоценки
+                        vver[adjId]++;
+
                         Edge newEdge = new Edge(v1.id, adjId);
-                        newEdge.error = CalculateError(v1, vertices[adjId], out newEdge.tx, out newEdge.ty, out newEdge.tz);
-                        
-                        int insertIdx = edges.BinarySearch(newEdge);
-                        if (insertIdx < 0) insertIdx = ~insertIdx;
-                        edges.Insert(insertIdx, newEdge);
+                        newEdge.error = CalculateError(v1, vertices[adjId],
+                            out newEdge.tx, out newEdge.ty, out newEdge.tz);
+                        newEdge.ver1 = vver[newEdge.v1]; newEdge.ver2 = vver[newEdge.v2];
+                        heap.Push(newEdge);
                     }
                 }
+                v2.adjacentVertices.Clear();
             }
 
             // 5. Упаковка новых массивов

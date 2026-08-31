@@ -22,13 +22,14 @@ namespace NWD2DWG.Plugin
         private static readonly char[] base64Chars = 
             "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz_$".ToCharArray();
 
+        private static readonly Random _rng = new Random();
+
         public static string New()
         {
-            var random = new Random(Guid.NewGuid().GetHashCode());
             char[] res = new char[22];
-            for (int i = 0; i < 22; i++)
+            lock (_rng)
             {
-                res[i] = base64Chars[random.Next(64)];
+                for (int i = 0; i < 22; i++) res[i] = base64Chars[_rng.Next(64)];
             }
             return new string(res);
         }
@@ -45,6 +46,8 @@ namespace NWD2DWG.Plugin
         private int _buildingPlacementId;
         private int _storeyPlacementId;
         private int _storeyId;
+        private int _geomContextId;
+        private int _bodyContextId;
         
         private List<string> _elements = new List<string>();
 
@@ -112,22 +115,38 @@ namespace NWD2DWG.Plugin
             int unitAssigId = GetNextId();
             AppendEntity(unitAssigId, "IFCUNITASSIGNMENT", $"(#{lengthUnitId},#{angleUnitId})");
 
+            // Геометрический контекст: обязателен для IfcProject.RepresentationContexts
+            // и для IfcShapeRepresentation.ContextOfItems (IFC2X3 §  ifcgeometricrepresentationcontext)
+            int trueNorthId = GetNextId();
+            AppendEntity(trueNorthId, "IFCDIRECTION", "(0.0,1.0)");
+
+            _geomContextId = GetNextId();
+            AppendEntity(_geomContextId, "IFCGEOMETRICREPRESENTATIONCONTEXT",
+                $"$,'Model',3,1.0E-05,#{_worldCoordinateSystemId},#{trueNorthId}");
+
+            _bodyContextId = GetNextId();
+            AppendEntity(_bodyContextId, "IFCGEOMETRICREPRESENTATIONSUBCONTEXT",
+                $"'Body','Model',*,*,*,*,#{_geomContextId},$,.MODEL_VIEW.,$");
+
             // Иерархия: Проект -> Участок -> Здание -> Этаж
             // (Hierarchy: Project -> Site -> Building -> Storey)
             int projectId = GetNextId();
-            AppendEntity(projectId, "IFCPROJECT", $"'{IfcGuid.New()}',#{_ownerHistoryId},'NWD2DWG Export',$,$,$,$,(#{_projectPlacementId}),#{unitAssigId}");
+            AppendEntity(projectId, "IFCPROJECT", $"'{IfcGuid.New()}',#{_ownerHistoryId},'NWD2DWG Export',$,$,$,$,(#{_geomContextId}),#{unitAssigId}");
+
+            int sitePlacementId = GetNextId();
+            AppendEntity(sitePlacementId, "IFCLOCALPLACEMENT", $"#{_projectPlacementId},#{_worldCoordinateSystemId}");
+
+            int siteId = GetNextId();
+            AppendEntity(siteId, "IFCSITE", $"'{IfcGuid.New()}',#{_ownerHistoryId},'Default Site',$,$,#{sitePlacementId},$,$,.ELEMENT.,$,$,$,$,$");
 
             _buildingPlacementId = GetNextId();
-            AppendEntity(_buildingPlacementId, "IFCLOCALPLACEMENT", $"#{_projectPlacementId},#{_worldCoordinateSystemId}");
-            
-            int siteId = GetNextId();
-            AppendEntity(siteId, "IFCSITE", $"'{IfcGuid.New()}',#{_ownerHistoryId},'Default Site',$,$,#{_buildingPlacementId},$,$,.ELEMENT.,$,$,$,$,$");
+            AppendEntity(_buildingPlacementId, "IFCLOCALPLACEMENT", $"#{sitePlacementId},#{_worldCoordinateSystemId}");
+
+            int buildingId = GetNextId();
+            AppendEntity(buildingId, "IFCBUILDING", $"'{IfcGuid.New()}',#{_ownerHistoryId},'Default Building',$,$,#{_buildingPlacementId},$,$,.ELEMENT.,$,$,$");
 
             _storeyPlacementId = GetNextId();
             AppendEntity(_storeyPlacementId, "IFCLOCALPLACEMENT", $"#{_buildingPlacementId},#{_worldCoordinateSystemId}");
-
-            int buildingId = GetNextId();
-            AppendEntity(buildingId, "IFCBUILDING", $"'{IfcGuid.New()}',#{_ownerHistoryId},'Default Building',$,$,#{_storeyPlacementId},$,$,.ELEMENT.,$,$,$");
 
             _storeyId = GetNextId();
             AppendEntity(_storeyId, "IFCBUILDINGSTOREY", $"'{IfcGuid.New()}',#{_ownerHistoryId},'Default Storey',$,$,#{_storeyPlacementId},$,$,.ELEMENT.,0.0");
@@ -230,7 +249,7 @@ namespace NWD2DWG.Plugin
             AppendEntity(brepId, "IFCFACETEDBREP", $"#{shellId}");
 
             int shapeRepId = GetNextId();
-            AppendEntity(shapeRepId, "IFCSHAPEREPRESENTATION", $"#{_worldCoordinateSystemId},'Body','Brep',(#{brepId})");
+            AppendEntity(shapeRepId, "IFCSHAPEREPRESENTATION", $"#{_bodyContextId},'Body','Brep',(#{brepId})");
 
             int prodDefShapeId = GetNextId();
             AppendEntity(prodDefShapeId, "IFCPRODUCTDEFINITIONSHAPE", $"$,$,(#{shapeRepId})");

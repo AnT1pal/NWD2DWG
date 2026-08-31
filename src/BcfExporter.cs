@@ -31,11 +31,19 @@ namespace NWD2DWG.Plugin
 
     public static class BcfExporter
     {
+        private static string Author = "NWD2DWG";
+
         /// <summary>
         /// Создание валидного .bcfzip (BCF 2.1) архива из списка топиков/коллизий
         /// </summary>
         public static void ExportBcfZip(string bcfPath, IList<BcfTopic> topics)
         {
+            ExportBcfZip(bcfPath, topics, "NWD2DWG");
+        }
+
+        public static void ExportBcfZip(string bcfPath, IList<BcfTopic> topics, string author)
+        {
+            Author = string.IsNullOrEmpty(author) ? "NWD2DWG" : author;
             if (topics == null || topics.Count == 0) return;
             string dir = Path.GetDirectoryName(bcfPath);
             if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir)) Directory.CreateDirectory(dir);
@@ -67,7 +75,7 @@ namespace NWD2DWG.Plugin
                         sw.WriteLine(string.Format("  <Topic Guid=\"{0}\" TopicType=\"Clash\" TopicStatus=\"{1}\">", topic.Guid, topic.Status));
                         sw.WriteLine(string.Format("    <Title>{0}</Title>", EscapeXml(topic.Title)));
                         sw.WriteLine(string.Format("    <CreationDate>{0:O}</CreationDate>", topic.CreationDate));
-                        sw.WriteLine(string.Format("    <CreationAuthor>NWD2DWG v3.0</CreationAuthor>"));
+                        sw.WriteLine(string.Format("    <CreationAuthor>{0}</CreationAuthor>", EscapeXml(Author)));
                         sw.WriteLine(string.Format("    <Description>{0}</Description>", EscapeXml(topic.Description)));
                         sw.WriteLine("  </Topic>");
                         sw.WriteLine(string.Format("  <Viewpoints Guid=\"{0}\">", topic.Guid));

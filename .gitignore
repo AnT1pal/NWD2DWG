@@ -1,4 +1,4 @@
-﻿# Build and temporary outputs
+# Build and temporary outputs
 selftest_out/
 *.tmp
 *.log
@@ -18,3 +18,15 @@ dist/TestAcad*
 .vscode/
 bin/
 obj/
+
+# Собранные бинарники и релизные архивы: их место - GitHub Releases,
+# а не история репозитория
+dist/*.exe
+dist/*.dll
+dist/*.zip
+!dist/README_RU.txt
+
+# Промежуточные выводы конвертера и тестов
+testout/
+selftest_out/
+tests_out/

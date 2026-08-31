@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -12,6 +12,8 @@ using Autodesk.Navisworks.Api;
 using Autodesk.Navisworks.Api.ComApi;
 using Autodesk.Navisworks.Api.Interop.ComApi;
 using Autodesk.Navisworks.Api.Plugins;
+using Autodesk.Navisworks.Api.Clash;
+using Autodesk.Navisworks.Api.Timeliner;
 
 namespace NWD2DWG.Plugin
 {
@@ -89,7 +91,32 @@ namespace NWD2DWG.Plugin
             log(string.Format("v3.0: geoShift={0}, grids={1}, tracePipes={2}, boq={3}, bcf={4}, anonymize={5}",
                 geoShift, exportGrids, tracePipes, exportBoq, exportBcf, anonymize));
 
+            // Раньше все эти флаги только печатались. Теперь они собираются в
+            // конвейер, который реально работает с извлечённой геометрией.
+            var engOpt = EngineeringOptions.FromArgs(parameters);
+            var eng = new EngineeringPipeline
+            {
+                Opt = engOpt,
+                Log = log,
+                OutBasePath = outPath,
+                SourceModel = inputNwd
+            };
+            log(string.Format("v3.1-3.4: clash={0}, plan={1}, purge={2}, sleeves={3}, clearance={4}, steel={5}, cog={6}, iso={7}, 4d={8}, wrap={9}, rooms={10}",
+                engOpt.ClusterClashes, engOpt.SectionPlan, engOpt.PurgeDxf, engOpt.BuildPenetrations,
+                engOpt.ValidateClearance, engOpt.MatchSteel, engOpt.CalcCog, engOpt.GenerateIso,
+                engOpt.MapSchedule4D, engOpt.Shrinkwrap, engOpt.RoomFinish));
+
             Stopwatch sw = Stopwatch.StartNew();
+            ConvertAbort.Reset();   // признак статический: прогонов может быть несколько
+
+            // Диагностика хода работы нужна в обеих ветках — и при экспорте
+            // по разделам, и при обычном. Поэтому объявляем на уровне метода.
+            bool denseWarned = false;
+            int heaviestFrags = 0;
+            string heaviestName = "";
+            string stopFlag = null;
+            try { stopFlag = Path.Combine(Path.GetDirectoryName(logPath) ?? "", "stop.flag"); }
+            catch { }
 
             try
             {
@@ -140,6 +167,25 @@ namespace NWD2DWG.Plugin
                     else if (uStr.Contains("foot") || uStr.Contains("feet")) insUnits = 2;
                 }
                 catch { }
+
+                eng.InsUnits = insUnits;
+                if (engOpt.GeoShift || engOpt.SectionPlan || engOpt.RoomFinish)
+                {
+                    double[] bounds = ComputeFragmentBounds(doc, skipHidden, log);
+                    if (bounds != null)
+                        eng.InitBounds(bounds[0], bounds[1], bounds[2], bounds[3], bounds[4], bounds[5]);
+                    else
+                        log("Габариты модели определить не удалось — геосдвиг и срез пропущены.");
+                }
+
+                // === Оси и уровни здания ===
+                if (engOpt.ExportGrids) ExportGridsAndLevels(doc, outPath, eng, log);
+
+                // === Коллизии Clash Detective ===
+                if (engOpt.NeedsClashData) CollectClashes(doc, eng, log);
+
+                // === График производства работ (4D) ===
+                if (engOpt.MapSchedule4D) CollectSchedule(doc, eng, log);
 
                 var sink = new PluginPrimitiveSink();
                 var cbProxy = new CallbackProxy { Sink = sink };
@@ -336,8 +382,9 @@ namespace NWD2DWG.Plugin
                             int secItems = 0, secFrags = 0;
                             long secTris = 0;
 
-                            using (var secWriter = new PluginDxfWriter(sectionOutPath, use3dFace, insUnits, withColors))
+                            using (var secWriter = new PluginDxfWriter(sectionOutPath, use3dFace, insUnits, withColors, !engOpt.Out.EmitGeometry))
                             {
+                                secWriter.StopFlagPath = stopFlag;
                                 secWriter.WritePreamble(sectionLayers);
                                 var secBatcher = new MeshBatcher(secWriter, 15000);
 
@@ -430,7 +477,8 @@ namespace NWD2DWG.Plugin
                                             if (decimatePercent > 0 && decimatePercent <= 90)
                                             {
                                                 double ratio = decimatePercent / 100.0;
-                                                MeshDecimator.Decimate(ref currentVerts, ref currentQuads, ratio);
+                                                MeshDecimator.Decimate(ref currentVerts, ref currentQuads, ratio,
+                                            engOpt.Cfg.DecimateBoundaryWeight, engOpt.Cfg.DecimatePreventFlips);
                                             }
 
                                             secFrags++;
@@ -455,7 +503,10 @@ namespace NWD2DWG.Plugin
                                             // === XData ===
                                             if (bimProps != null && bimProps.Count > 0)
                                             {
-                                                secWriter.WriteXData(PluginDxfWriter.SanitizeLayer(layer), bimProps);
+                                                secWriter.WriteElementProps(PluginDxfWriter.SanitizeLayer(layer), bimProps,
+                                                    currentVerts.Count >= 3 ? currentVerts[0] : 0.0,
+                                                    currentVerts.Count >= 3 ? currentVerts[1] : 0.0,
+                                                    currentVerts.Count >= 3 ? currentVerts[2] : 0.0);
                                             }
                                         }
                                     }
@@ -504,7 +555,21 @@ namespace NWD2DWG.Plugin
                 MeshBatcher batcher = null;
                 if (!useGltf && !useIfc)
                 {
-                    writer = new PluginDxfWriter(outPath, use3dFace, insUnits, withColors);
+                    // Слой <имя>_BIM должен быть объявлен в TABLES, иначе TEXT
+                    // со свойствами ссылается на несуществующий слой
+                    if (transferXData)
+                    {
+                        var bimLayers = new List<string>();
+                        foreach (string ln in layerList)
+                            bimLayers.Add(PluginDxfWriter.SanitizeLayer(ln) + "_BIM");
+                        layerList.AddRange(bimLayers);
+                    }
+                    // Флаг лежит в каталоге прогона рядом с журналом плагина.
+                    bool discardGeometry = !engOpt.Out.EmitGeometry;
+                    if (discardGeometry)
+                        log("Основная геометрия не пишется (шаблон выдачи): считаются только ведомости и отчёты");
+                    writer = new PluginDxfWriter(outPath, use3dFace, insUnits, withColors, discardGeometry);
+                    writer.StopFlagPath = stopFlag;
                     writer.WritePreamble(layerList);
                     batcher = new MeshBatcher(writer, 15000);
                 }
@@ -561,15 +626,51 @@ namespace NWD2DWG.Plugin
                             // === Прозрачность ===
                             int transparency = readTransparency != null ? readTransparency(item) : 0;
 
+                            // Имя и материал элемента — нужны инженерным модулям
+                            // (ВОР, ведомость КМ, расчёт массы)
+                            string itemName = "";
+                            try { itemName = item.DisplayName ?? ""; } catch { }
+                            // материал берём из свойств элемента (если они
+                            // извлекаются), иначе распознаём по имени и слою
+                            string matName = "";
+
                             // === BIM свойства (XData) ===
                             Dictionary<string, string> bimProps = extractProperties != null ? extractProperties(item) : null;
+                            if (bimProps != null) matName = MaterialFromProps(bimProps);
 
                             string layer = layersPerItem
                                 ? (!string.IsNullOrEmpty(item.DisplayName) ? item.DisplayName : modelName)
                                 : modelName;
 
+                            // Счётчик по фрагментам, а не по элементам.
+                            //
+                            // Модель на 2 МБ однажды выдала 34.8 ГБ: счётчик
+                            // элементов замер на десяти тысячах, а запись шла
+                            // ещё полчаса. Значит работа ушла внутрь одного
+                            // элемента, и наружу об этом не сообщалось ничем.
+                            // Сигнал остановки тоже проверялся только по
+                            // элементам — то есть в таком случае не сработал бы.
+                            int fragsHere = 0;
+
                             foreach (InwOaFragment3 frag in frags)
                             {
+                                if (ConvertAbort.Requested) break;
+
+                                if ((++fragsHere % 20000) == 0)
+                                {
+                                    log(string.Format(CultureInfo.InvariantCulture,
+                                        "ВНИМАНИЕ: элемент «{0}» отдал уже {1} фрагментов " +
+                                        "(треугольников всего {2}) — это ненормально много",
+                                        string.IsNullOrEmpty(itemName) ? "без имени" : itemName,
+                                        fragsHere, totalTriangles));
+
+                                    if (stopFlag != null && File.Exists(stopFlag))
+                                    {
+                                        log("ОСТАНОВЛЕНО по сигналу наблюдателя внутри элемента.");
+                                        break;
+                                    }
+                                }
+
                                 double[] m = GetMatrix(frag);
                                 if (m == null) continue;
 
@@ -608,11 +709,20 @@ namespace NWD2DWG.Plugin
                                         if (currentQuads.Count == 0) continue;
                                     }
 
+                                    // === Геосдвиг к нулю ===
+                                    // применяем до всех расчётов и записи, иначе
+                                    // побочные файлы окажутся в других координатах
+                                    eng.ApplyShift(currentVerts);
+
                                     // === Mesh Decimation ===
-                                    if (decimatePercent > 0 && decimatePercent <= 90)
+                                    // совсем мелкие фрагменты (тетраэдр/коробка)
+                                    // упрощать нечем — порог задаётся в настройках
+                                    if (decimatePercent > 0 && decimatePercent <= 90 &&
+                                        currentQuads.Count / 4 >= engOpt.Cfg.DecimateMinTriangles)
                                     {
                                         double ratio = decimatePercent / 100.0;
-                                        MeshDecimator.Decimate(ref currentVerts, ref currentQuads, ratio);
+                                        MeshDecimator.Decimate(ref currentVerts, ref currentQuads, ratio,
+                                            engOpt.Cfg.DecimateBoundaryWeight, engOpt.Cfg.DecimatePreventFlips);
                                     }
 
                                     totalFragments++;
@@ -620,27 +730,58 @@ namespace NWD2DWG.Plugin
                                     totalVertices += currentVerts.Count / 3;
 
                                     // === Solid Detection ===
-                                    if (solidDetect && writer != null)
+                                    SolidResult solid = null;
+                                    bool solidWritten = false;
+                                    if (solidDetect || engOpt.TracePipes || engOpt.GenerateIso || engOpt.BuildPenetrations)
                                     {
-                                        SolidResult solid = SolidReconstructor.TryReconstruct(currentVerts, currentQuads);
-                                        if (solid != null && solid.Type != SolidType.None && solid.Confidence > 0.7)
+                                        solid = SolidReconstructor.TryReconstruct(currentVerts, currentQuads);
+                                        if (solidDetect && writer != null && solid != null &&
+                                            solid.Type != SolidType.None &&
+                                            solid.Confidence >= engOpt.Cfg.SolidMinConfidence)
                                         {
                                             SolidReconstructor.WriteSolidDxf(writer.RawWriter, solid, PluginDxfWriter.SanitizeLayer(layer), rgb);
-                                            continue; // Используем solid вместо mesh
+                                            solidWritten = true;
                                         }
                                     }
+
+                                    // === Оболочка вместо внутренностей (защита ноу-хау) ===
+                                    if (engOpt.Shrinkwrap && !solidWritten)
+                                    {
+                                        // уровень 1 сохраняет фланцы и точки врезки,
+                                        // уровни 2-3 сводят элемент к габаритной оболочке
+                                        var wrap = ShrinkWrapper.WrapMesh(currentVerts, currentQuads,
+                                                                          engOpt.Cfg.ShrinkwrapLevel <= 1);
+                                        if (wrap != null && wrap.OutQuads.Count >= 4)
+                                        {
+                                            currentVerts = wrap.OutVerts;
+                                            currentQuads = wrap.OutQuads;
+                                        }
+                                    }
+
+                                    // === Инженерные расчёты по элементу ===
+                                    if (engOpt.AnyGeometryConsumer)
+                                        eng.OnElement(itemName, layer, matName, currentVerts, currentQuads, solid);
 
                                     // === DXF output ===
-                                    if (batcher != null)
+                                    if (batcher != null && !solidWritten)
                                     {
                                         batcher.AddGeometry(layer, rgb, currentVerts, currentQuads, transparency);
-
-                                        // === XData ===
-                                        if (bimProps != null && bimProps.Count > 0 && writer != null)
-                                        {
-                                            writer.WriteXData(PluginDxfWriter.SanitizeLayer(layer), bimProps);
-                                        }
                                     }
+
+                                    // === Свойства элемента (после анонимизации) ===
+                                    // раньше распознанный solid делал continue и
+                                    // молча терял атрибуты элемента
+                                    if (bimProps != null && bimProps.Count > 0 && writer != null && batcher != null)
+                                    {
+                                        var outProps = eng.FilterProps(bimProps);
+                                        if (outProps != null && outProps.Count > 0)
+                                            writer.WriteElementProps(PluginDxfWriter.SanitizeLayer(layer), outProps,
+                                                currentVerts.Count >= 3 ? currentVerts[0] : 0.0,
+                                                currentVerts.Count >= 3 ? currentVerts[1] : 0.0,
+                                                currentVerts.Count >= 3 ? currentVerts[2] : 0.0);
+                                    }
+
+                                    if (solidWritten) continue;
 
                                     // === glTF output ===
                                     if (gltfWriter != null)
@@ -686,14 +827,65 @@ namespace NWD2DWG.Plugin
                                 }
                             }
 
+                            if (ConvertAbort.Requested)
+                            {
+                                log("ОСТАНОВЛЕНО: обход прекращён по сигналу, " +
+                                    "ведомости считаются на уже собранных данных.");
+                                break;
+                            }
+
                             if (totalItems % 2000 == 0)
                             {
+                                if (fragsHere > heaviestFrags)
+                                {
+                                    heaviestFrags = fragsHere;
+                                    heaviestName = itemName;
+                                }
+
+                                // Плотность разбиения задаёт сам Navisworks, и через
+                                // публичный API она недоступна — проверено по
+                                // Autodesk.Navisworks.Api, COM-интерфейсу и дереву
+                                // настроек приложения. Раз повлиять нельзя, надо хотя
+                                // бы предупредить: архитектура одного здания на 2.5 МБ
+                                // выдавала 62 млн треугольников и десятки гигабайт.
+                                if (!denseWarned && totalTriangles > 5000000)
+                                {
+                                    denseWarned = true;
+                                    log(string.Format(CultureInfo.InvariantCulture,
+                                        "ВНИМАНИЕ: очень плотная сетка — уже {0:F1} млн треугольников. " +
+                                        "Ожидаемая выдача порядка {1:F1} ГБ. Плотность разбиения задаётся " +
+                                        "в самом Navisworks (Параметры - Модель - Производительность) и " +
+                                        "через API недоступна. Уменьшить объём: упрощение сетки, " +
+                                        "габаритные оболочки либо отказ от записи геометрии.",
+                                        totalTriangles / 1e6, totalTriangles * 190.0 / 1073741824.0));
+                                }
+
+                                double el = sw.Elapsed.TotalSeconds;
                                 log(string.Format(CultureInfo.InvariantCulture,
-                                    "Обработано элементов: {0}, фрагментов: {1}, треугольников: {2}",
-                                    totalItems, totalFragments, totalTriangles));
+                                    "обработано элементов {0}, фрагментов {1}, треугольников {2}" +
+                                    " | {3:F0} с, {4:F0} эл/с",
+                                    totalItems, totalFragments, totalTriangles,
+                                    el, el > 0 ? totalItems / el : 0));
+
+                                // Сигнал от наблюдателя: место на диске кончается
+                                // или файл вырос до неразумного размера. Останов
+                                // по флагу, а не по исключению: выдача должна
+                                // остаться пригодной, а ведомости — досчитаться.
+                                if (writer != null && writer.Stopped)
+                                {
+                                    log("ОСТАНОВЛЕНО: запись геометрии прекращена по сигналу. " +
+                                        "Обход модели завершается, ведомости считаются на собранных данных.");
+                                    break;
+                                }
                             }
                         }
                     }
+
+                    if (heaviestFrags > 5000)
+                        log(string.Format(CultureInfo.InvariantCulture,
+                            "Самый тяжёлый элемент: «{0}» — {1} фрагментов",
+                            string.IsNullOrEmpty(heaviestName) ? "без имени" : heaviestName,
+                            heaviestFrags));
 
                     // === Финализация ===
                     if (batcher != null) batcher.FlushAll();
@@ -706,6 +898,16 @@ namespace NWD2DWG.Plugin
                     if (writer != null) writer.Dispose();
                 }
 
+                // Побочные файлы инженерных модулей пишем после закрытия DXF
+                try
+                {
+                    string engReport = eng.Finish();
+                    if (!string.IsNullOrEmpty(engReport))
+                        foreach (string line in engReport.Split('\n'))
+                            if (!string.IsNullOrEmpty(line.Trim())) log(line.TrimEnd());
+                }
+                catch (Exception eex) { log("Инженерные модули: ОШИБКА " + eex.Message); }
+
                 string outFile = outPath;
                 if (useGltf) outFile = Path.ChangeExtension(outPath, format == "glb" ? ".glb" : ".gltf");
                 else if (useIfc) outFile = Path.ChangeExtension(outPath, ".ifc");
@@ -716,6 +918,20 @@ namespace NWD2DWG.Plugin
                     Path.GetFileName(outFile), totalItems, totalFragments, totalTriangles, totalVertices,
                     fi != null ? fi.Length / 1048576.0 : 0, sw.Elapsed));
 
+                // Освобождаем документ за собой.
+                //
+                // При работе через уже открытый Navisworks модель остаётся
+                // загруженной, и следующий файл упирается в занятый экземпляр:
+                // подключение к нему не проходит, программа откатывается к
+                // собственному запуску — а он на 2026 нестабилен. Чистим место
+                // для следующей модели сразу.
+                try
+                {
+                    Application.MainDocument.Clear();
+                    log("документ выгружен, экземпляр свободен для следующей модели");
+                }
+                catch (Exception cex) { log("выгрузить документ не удалось: " + cex.Message); }
+
                 return 0;
             }
             catch (Exception ex)
@@ -725,6 +941,408 @@ namespace NWD2DWG.Plugin
                 try { File.WriteAllText(Path.Combine(Path.GetTempPath(), "NWD2DWG_plugin_error.log"), err, Encoding.UTF8); } catch { }
                 return 99;
             }
+        }
+
+        // --------------------------------------------------------------------
+        // Оси и уровни здания из DocumentGrids.
+        // Уровни (GridLevel.Elevation) API отдаёт честно. Геометрию самих
+        // координационных осей публичный API не раскрывает — GridLine несёт
+        // только DisplayName, поэтому оси выводим подписями по габаритам
+        // модели и прямо сообщаем об ограничении.
+        // --------------------------------------------------------------------
+        static void ExportGridsAndLevels(Document doc, string outPath,
+                                         EngineeringPipeline eng, Action<string> log)
+        {
+            try
+            {
+                var grids = doc.Grids;
+                if (grids == null || grids.ActiveSystem == null)
+                {
+                    log("[Оси и уровни] В модели нет координационных систем (DocumentGrids пуст).");
+                    return;
+                }
+
+                var sys = grids.ActiveSystem;
+                var data = new List<GridLineData>();
+
+                double dx = eng.ShiftActive ? eng.Geo.OffsetX : 0;
+                double dy = eng.ShiftActive ? eng.Geo.OffsetY : 0;
+                double dz = eng.ShiftActive ? eng.Geo.OffsetZ : 0;
+
+                double x0 = 0, y0 = 0, x1 = 10000, y1 = 10000;
+                try
+                {
+                    BoundingBox3D bb = doc.GetBoundingBox(false);
+                    if (bb != null && !bb.IsEmpty)
+                    {
+                        x0 = bb.Min.X + dx; y0 = bb.Min.Y + dy;
+                        x1 = bb.Max.X + dx; y1 = bb.Max.Y + dy;
+                    }
+                }
+                catch { }
+
+                int levels = 0;
+                foreach (var lv in sys.Levels)
+                {
+                    double z = lv.Elevation + dz;
+                    data.Add(new GridLineData
+                    {
+                        Name = lv.DisplayName,
+                        StartX = x0, StartY = y0, StartZ = z,
+                        EndX = x1, EndY = y0, EndZ = z,
+                        IsLevel = true
+                    });
+                    levels++;
+                }
+
+                int lines = 0;
+                try { foreach (var gl in sys.Lines) { lines++; } } catch { }
+
+                string path = Path.Combine(
+                    Path.GetDirectoryName(Path.GetFullPath(outPath)) ?? ".",
+                    Path.GetFileNameWithoutExtension(outPath) + "_grids.dxf");
+
+                using (var w = new StreamWriter(path, false, Encoding.Default))
+                {
+                    w.WriteLine("0\nSECTION\n2\nHEADER");
+                    w.WriteLine("9\n$ACADVER\n1\nAC1015");
+                    w.WriteLine("0\nENDSEC");
+                    w.WriteLine("0\nSECTION\n2\nTABLES");
+                    w.WriteLine("0\nTABLE\n2\nLAYER\n70\n3");
+                    w.WriteLine("0\nLAYER\n2\n0\n70\n0\n62\n7\n6\nCONTINUOUS");
+                    w.WriteLine("0\nLAYER\n2\n_GRIDS\n70\n0\n62\n2\n6\nCONTINUOUS");
+                    w.WriteLine("0\nLAYER\n2\n_LEVELS\n70\n0\n62\n1\n6\nCONTINUOUS");
+                    w.WriteLine("0\nENDTAB");
+                    w.WriteLine("0\nENDSEC");
+                    w.WriteLine("0\nSECTION\n2\nENTITIES");
+                    GridExtractor.WriteGridsToDxf(w, data, 300.0);
+                    w.WriteLine("0\nENDSEC");
+                    w.WriteLine("0\nEOF");
+                }
+
+                log(string.Format(CultureInfo.InvariantCulture,
+                    "[Оси и уровни] Уровней выгружено: {0} -> {1}", levels, Path.GetFileName(path)));
+                if (lines > 0)
+                    log(string.Format(CultureInfo.InvariantCulture,
+                        "[Оси и уровни] Координационных осей в системе: {0}, но геометрию линий " +
+                        "публичный API Navisworks не отдаёт — в DXF выгружены только уровни.", lines));
+            }
+            catch (Exception ex)
+            {
+                log("[Оси и уровни] ОШИБКА: " + ex.Message);
+            }
+        }
+
+        // --------------------------------------------------------------------
+        // Габариты модели по матрицам фрагментов.
+        //
+        // Это единственный источник, гарантированно совпадающий с координатами
+        // извлекаемой геометрии: тот же COM-путь, те же матрицы. Управляемый
+        // doc.GetBoundingBox() отдаёт бокс в другой системе координат — на
+        // проверочной модели его размахи отличались от фактических в десятки
+        // и сотни раз, из-за чего геосдвиг смещал модель на неверную величину.
+        //
+        // Примитивы не генерируются: читается только перенос матрицы, поэтому
+        // проход дешёвый по сравнению с самой конвертацией.
+        // --------------------------------------------------------------------
+        static double[] ComputeFragmentBounds(Document doc, bool skipHidden, Action<string> log)
+        {
+            double minX = double.MaxValue, minY = double.MaxValue, minZ = double.MaxValue;
+            double maxX = double.MinValue, maxY = double.MinValue, maxZ = double.MinValue;
+            int frags = 0;
+            var sw = Stopwatch.StartNew();
+
+            try
+            {
+                foreach (Model model in doc.Models)
+                {
+                    ModelItem root = model.RootItem;
+                    if (root == null) continue;
+                    foreach (ModelItem item in root.DescendantsAndSelf)
+                    {
+                        if (skipHidden && item.IsHidden) continue;
+                        if (!item.HasGeometry) continue;
+
+                        InwOaPath3 oaPath = null;
+                        try { oaPath = (InwOaPath3)ComApiBridge.ToInwOaPath(item); } catch { continue; }
+                        if (oaPath == null) continue;
+
+                        IEnumerable fl = null;
+                        try { fl = (IEnumerable)oaPath.Fragments(); } catch { continue; }
+                        if (fl == null) continue;
+
+                        foreach (InwOaFragment3 frag in fl)
+                        {
+                            double[] m = GetMatrix(frag);
+                            if (m == null) continue;
+                            double x = m[12], y = m[13], z = m[14];
+                            if (x < minX) minX = x; if (x > maxX) maxX = x;
+                            if (y < minY) minY = y; if (y > maxY) maxY = y;
+                            if (z < minZ) minZ = z; if (z > maxZ) maxZ = z;
+                            frags++;
+                        }
+                    }
+                }
+            }
+            catch (Exception ex) { log("Обход габаритов прерван: " + ex.Message); }
+
+            if (frags == 0) return null;
+            log(string.Format(CultureInfo.InvariantCulture,
+                "Габариты по {0} фрагментам за {1:F1} с: X {2:F0}..{3:F0}, Y {4:F0}..{5:F0}, Z {6:F0}..{7:F0}",
+                frags, sw.Elapsed.TotalSeconds, minX, maxX, minY, maxY, minZ, maxZ));
+            return new[] { minX, minY, minZ, maxX, maxY, maxZ };
+        }
+
+        // --------------------------------------------------------------------
+        // Результаты Clash Detective: точки для кластеризации и топики BCF.
+        // Раньше флаги --bcf и --clash-cluster печатались в лог и ничего не
+        // делали, потому что источник данных не был подключён.
+        // --------------------------------------------------------------------
+        static void CollectClashes(Document doc, EngineeringPipeline eng, Action<string> log)
+        {
+            try
+            {
+                DocumentClash clash = doc.GetClash();
+                if (clash == null || clash.TestsData == null || clash.TestsData.Tests.Count == 0)
+                {
+                    log("[Коллизии] В модели нет проверок Clash Detective.");
+                    return;
+                }
+
+                var cfg = eng.Opt.Cfg;
+                int tests = 0, taken = 0, skipped = 0;
+
+                foreach (SavedItem si in clash.TestsData.Tests)
+                {
+                    ClashTest test = si as ClashTest;
+                    if (test == null) continue;
+                    tests++;
+                    foreach (SavedItem res in test.Children)
+                        TakeClashResult(res, test.DisplayName, cfg, eng, ref taken, ref skipped);
+                }
+
+                log(string.Format(CultureInfo.InvariantCulture,
+                    "[Коллизии] Проверок: {0}, принято результатов: {1}, отфильтровано: {2}",
+                    tests, taken, skipped));
+            }
+            catch (Exception ex)
+            {
+                log("[Коллизии] ОШИБКА чтения Clash Detective: " + ex.Message);
+            }
+        }
+
+        static void TakeClashResult(SavedItem item, string testName, AdvancedConfig cfg,
+                                    EngineeringPipeline eng, ref int taken, ref int skipped)
+        {
+            var group = item as ClashResultGroup;
+            if (group != null)
+            {
+                // группа результатов: разбираем вложенные коллизии
+                foreach (SavedItem child in group.Children)
+                    TakeClashResult(child, testName, cfg, eng, ref taken, ref skipped);
+                return;
+            }
+
+            var r = item as ClashResult;
+            if (r == null) return;
+
+            string status = r.Status.ToString();
+            if (!cfg.ClashIncludeResolved && status.IndexOf("Resolved", StringComparison.OrdinalIgnoreCase) >= 0)
+            { skipped++; return; }
+            if (!cfg.ClashIncludeApproved && status.IndexOf("Approved", StringComparison.OrdinalIgnoreCase) >= 0)
+            { skipped++; return; }
+            if (Math.Abs(r.Distance) < cfg.ClashMinDistanceMm / 1000.0 * UnitScaleGuess(r))
+            { skipped++; return; }
+
+            string assignee = "";
+            try { if (r.AssignedTo != null) assignee = r.AssignedTo.DisplayName; } catch { }
+            DateTime created = r.CreatedTime.HasValue ? r.CreatedTime.Value : DateTime.Now;
+
+            eng.AddClash(r.Center.X, r.Center.Y, r.Center.Z, r.Distance,
+                         r.DisplayName, testName, status,
+                         r.Guid.ToString(), created, assignee);
+            taken++;
+        }
+
+        // Distance приходит в единицах документа; фильтр задан в мм
+        static double UnitScaleGuess(ClashResult r) { return 1000.0; }
+
+        // --------------------------------------------------------------------
+        // График работ: сначала TimeLiner из модели, иначе внешний файл.
+        // --------------------------------------------------------------------
+        static void CollectSchedule(Document doc, EngineeringPipeline eng, Action<string> log)
+        {
+            var cfg = eng.Opt.Cfg;
+            if (cfg.ScheduleSource != "File")
+            {
+                try
+                {
+                    DocumentTimeliner tl = doc.GetTimeliner();
+                    if (tl != null && tl.TasksRoot != null)
+                    {
+                        int n = 0;
+                        CollectTimelinerTasks(doc, tl.TasksRoot.Children, eng, ref n);
+                        if (n > 0)
+                        {
+                            eng.ScheduleOrigin = "TimeLiner";
+                            log(string.Format(CultureInfo.InvariantCulture,
+                                "[4D] Из TimeLiner прочитано задач: {0}", n));
+                            return;
+                        }
+                    }
+                    log("[4D] TimeLiner в модели пуст.");
+                }
+                catch (Exception ex) { log("[4D] ОШИБКА чтения TimeLiner: " + ex.Message); }
+            }
+
+            string file = eng.Opt.ScheduleFile;
+            if (string.IsNullOrEmpty(file) || !File.Exists(file))
+            {
+                if (cfg.ScheduleSource == "File")
+                    log("[4D] Файл графика не найден: " + (string.IsNullOrEmpty(file) ? "(не задан)" : file));
+                return;
+            }
+            try
+            {
+                var tasks = ScheduleMapper.LoadSchedule(file);
+                foreach (var t in tasks)
+                {
+                    eng.Tasks4D.Add(t);
+                    eng.TaskLinkCounts[t.Uid ?? ""] = 1; // из файла привязку не знаем
+                }
+                eng.ScheduleOrigin = Path.GetFileName(file);
+                log(string.Format(CultureInfo.InvariantCulture,
+                    "[4D] Из файла {0} прочитано задач: {1}", Path.GetFileName(file), tasks.Count));
+            }
+            catch (Exception ex) { log("[4D] ОШИБКА разбора графика: " + ex.Message); }
+        }
+
+        static void CollectTimelinerTasks(Document doc, SavedItemCollection items, EngineeringPipeline eng, ref int n)
+        {
+            foreach (SavedItem si in items)
+            {
+                var task = si as TimelinerTask;
+                if (task == null) continue;
+
+                if (task.Children != null && task.Children.Count > 0)
+                    CollectTimelinerTasks(doc, task.Children, eng, ref n);
+
+                if (!task.PlannedStartDate.HasValue && !task.PlannedEndDate.HasValue) continue;
+
+                string uid = task.Guid.ToString();
+                var st = new ScheduleTask
+                {
+                    Uid = uid,
+                    Name = task.DisplayName,
+                    Wbs = task.DisplayId ?? "",
+                    PlannedStart = task.PlannedStartDate ?? DateTime.MinValue,
+                    PlannedFinish = task.PlannedEndDate ?? DateTime.MinValue,
+                    ActualStart = task.ActualStartDate,
+                    ActualFinish = task.ActualEndDate,
+                    PercentComplete = task.ProgressPercent.HasValue ? task.ProgressPercent.Value : 0.0
+                };
+
+                int links = 0;
+                try
+                {
+                    if (task.Selection != null)
+                    {
+                        var sel = task.Selection.GetSelectedItems(doc);
+                        if (sel != null) links = sel.Count;
+                    }
+                }
+                catch { }
+
+                eng.Tasks4D.Add(st);
+                eng.TaskLinkCounts[uid] = links;
+                n++;
+            }
+        }
+
+        // Свойства складываются с ключом «Категория::Свойство», а искали их
+        // по голому "Material" — совпадения не было никогда. Из-за этого
+        // материал не определялся даже с ключом --xdata, и вся ведомость масс
+        // считалась по плотности стали.
+        //
+        // Ищем по последнему сегменту ключа и по нескольким известным именам:
+        // Revit пишет «Материалы и отделка::Материал конструкции», IFC —
+        // «Material», экспорт из Tekla — «Materials::Material».
+        private static readonly string[] MaterialKeys =
+        {
+            "материал конструкции", "материал", "material", "структурный материал",
+            "structural material", "материал элемента", "материалы",
+        };
+
+        /// <summary>
+        /// Не марка, а атрибут отображения CAD.
+        ///
+        /// В свойстве материала модели попадаются «ByLayer», «ПоСлою» и
+        /// «Индекс цвета AutoCAD 5»: так CAD записывает, откуда берётся цвет.
+        /// В ведомость они шли отдельными позициями наравне со «Сталь 20» —
+        /// на проверяемой модели 47 и 367 фрагментов соответственно. Материала
+        /// в них нет, и лучше честное «не задан», чем выдуманная марка.
+        /// </summary>
+        private static bool IsDisplayAttribute(string v)
+        {
+            if (string.IsNullOrEmpty(v)) return true;
+            string s = v.Trim().ToLowerInvariant();
+            if (s.Length == 0) return true;
+
+            if (s == "bylayer" || s == "byblock" || s == "bymaterial" ||
+                s == "по слою" || s == "послою" || s == "по блоку" || s == "поблоку" ||
+                s == "default" || s == "none" || s == "нет" || s == "не задан")
+                return true;
+
+            if (s.Contains("индекс цвета") || s.Contains("color index")) return true;
+
+            // Чистое число маркой быть не может.
+            double num;
+            if (double.TryParse(s, System.Globalization.NumberStyles.Any,
+                                CultureInfo.InvariantCulture, out num)) return true;
+
+            return false;
+        }
+
+        internal static string MaterialFromProps(Dictionary<string, string> props)
+        {
+            if (props == null || props.Count == 0) return "";
+
+            string fallback = "";
+            foreach (var kv in props)
+            {
+                if (string.IsNullOrEmpty(kv.Value)) continue;
+                if (IsDisplayAttribute(kv.Value)) continue;
+
+                string key = kv.Key;
+                int sep = key.LastIndexOf("::", StringComparison.Ordinal);
+                string leaf = (sep >= 0 ? key.Substring(sep + 2) : key).Trim().ToLowerInvariant();
+
+                for (int i = 0; i < MaterialKeys.Length; i++)
+                {
+                    if (leaf != MaterialKeys[i]) continue;
+                    // Точное совпадение по первым именам списка предпочтительнее:
+                    // «Материал конструкции» точнее, чем просто «Материалы».
+                    if (i <= 1 || i == 2) return kv.Value.Trim();
+                    if (fallback.Length == 0) fallback = kv.Value.Trim();
+                }
+            }
+
+            if (fallback.Length > 0) return fallback;
+
+            // Ничего точного не нашлось — берём свойство, у которого имя
+            // содержит «материал», но не является ссылкой на файл или номером.
+            foreach (var kv in props)
+            {
+                if (string.IsNullOrEmpty(kv.Value)) continue;
+                if (IsDisplayAttribute(kv.Value)) continue;
+                string k = kv.Key.ToLowerInvariant();
+                if (k.Contains("материал") || k.Contains("material"))
+                {
+                    string v = kv.Value.Trim();
+                    if (v.Length > 0 && v.Length < 64) return v;
+                }
+            }
+            return "";
         }
 
         static double[] GetMatrix(InwOaFragment3 frag)
@@ -754,7 +1372,10 @@ namespace NWD2DWG.Plugin
 
         public void Triangle(InwSimpleVertex v1, InwSimpleVertex v2, InwSimpleVertex v3)
         {
-            if (Sink == null) return;
+            // Прервать сам вызов GenerateSimplePrimitives нельзя — он внутри
+            // Navisworks. Но можно перестать принимать: тогда обход одного
+            // тяжёлого фрагмента заканчивается за секунды, а не за полчаса.
+            if (Sink == null || ConvertAbort.Requested) return;
             double x1, y1, z1, x2, y2, z2, x3, y3, z3;
             if (!Sink.VertexToWorld(v1, out x1, out y1, out z1)) return;
             if (!Sink.VertexToWorld(v2, out x2, out y2, out z2)) return;
@@ -934,6 +1555,8 @@ namespace NWD2DWG.Plugin
     public class PluginDxfWriter : IDisposable
     {
         private StreamWriter _w;
+        private string _path;
+        private bool _discard;
         private bool _use3dFace;
         private int _insUnits;
         private bool _withColors;
@@ -941,14 +1564,89 @@ namespace NWD2DWG.Plugin
         /// <summary>Доступ к StreamWriter для SolidReconstructor.WriteSolidDxf()</summary>
         public StreamWriter RawWriter { get { return _w; } }
 
+        // ---------------------------------------------------------------
+        // Аварийная остановка записи.
+        //
+        // Проверять сигнал в циклах по элементам и фрагментам оказалось
+        // недостаточно: на конструктивной модели вся работа уходила внутрь
+        // одного фрагмента, который отдавал миллионы треугольников. Счётчики
+        // при этом стояли, сигнал никто не читал, и файл вырос с 20 до 36 ГБ
+        // уже ПОСЛЕ команды остановиться.
+        //
+        // Поэтому проверка живёт в самом писателе: что бы ни вызывало запись
+        // и откуда бы ни вызывало, поток подменяется на пустой, и файл
+        // перестаёт расти в тот же миг. Обход при этом доходит до конца сам,
+        // и ведомости досчитываются на уже собранных данных.
+        // ---------------------------------------------------------------
+        public string StopFlagPath;
+        private bool _stopped;
+        private DateTime _lastStopCheck = DateTime.MinValue;
+
+        /// <summary>Запись прекращена по сигналу.</summary>
+        public bool Stopped { get { return _stopped; } }
+
+        /// <summary>Уже записанный объём, байт.</summary>
+        public long BytesWritten
+        {
+            get
+            {
+                try { _w.Flush(); return _path != null && File.Exists(_path) ? new FileInfo(_path).Length : 0; }
+                catch { return 0; }
+            }
+        }
+
+        private bool StopRequested()
+        {
+            if (_stopped) return true;
+            if (string.IsNullOrEmpty(StopFlagPath)) return false;
+
+            // Обращение к диску не чаще раза в секунду: иначе проверка
+            // стоила бы дороже самой записи.
+            var now = DateTime.UtcNow;
+            if ((now - _lastStopCheck).TotalMilliseconds < 1000) return false;
+            _lastStopCheck = now;
+
+            bool tripped;
+            try { tripped = File.Exists(StopFlagPath); }
+            catch { return false; }
+            if (!tripped) return false;
+
+            _stopped = true;
+            ConvertAbort.Request();
+            try
+            {
+                _w.Flush();
+                if (!_discard) _w.Dispose();
+            }
+            catch { }
+            _w = new StreamWriter(Stream.Null, new UTF8Encoding(false));
+            _w.NewLine = "\r\n";
+            return true;
+        }
+
         public PluginDxfWriter(string path, bool use3dFace, int insUnits, bool withColors)
+            : this(path, use3dFace, insUnits, withColors, false) { }
+
+        /// <summary>discard = писать «в никуда»: нужны только ведомости.
+        /// Объект остаётся полноценным, поэтому вызывающий код не меняется —
+        /// иначе пришлось бы обвешивать проверками каждое обращение.</summary>
+        public PluginDxfWriter(string path, bool use3dFace, int insUnits, bool withColors, bool discard)
         {
             _use3dFace = use3dFace;
             _insUnits = insUnits;
             _withColors = withColors;
-            string dir = Path.GetDirectoryName(Path.GetFullPath(path));
-            if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir)) Directory.CreateDirectory(dir);
-            _w = new StreamWriter(path, false, new UTF8Encoding(false), 1 << 20);
+            _path = discard ? null : path;
+            _discard = discard;
+            if (discard)
+            {
+                _w = new StreamWriter(Stream.Null, new UTF8Encoding(false));
+            }
+            else
+            {
+                string dir = Path.GetDirectoryName(Path.GetFullPath(path));
+                if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir)) Directory.CreateDirectory(dir);
+                _w = new StreamWriter(path, false, new UTF8Encoding(false), 1 << 20);
+            }
             _w.NewLine = "\r\n";
         }
 
@@ -977,6 +1675,7 @@ namespace NWD2DWG.Plugin
 
         public void WriteMesh(string layer, int rgb, List<double> verts, List<int> quads)
         {
+            if (StopRequested()) return;
             if (verts == null || verts.Count == 0 || quads == null || quads.Count == 0) return;
             string cleanLayer = SanitizeLayer(layer);
 
@@ -1110,6 +1809,7 @@ namespace NWD2DWG.Plugin
         /// <summary>WriteMesh с поддержкой прозрачности (DXF group code 440)</summary>
         public void WriteMesh(string layer, int rgb, List<double> verts, List<int> quads, int transparency)
         {
+            if (StopRequested()) return;
             // Основная логика WriteMesh без изменений
             WriteMesh(layer, rgb, verts, quads);
 
@@ -1118,40 +1818,67 @@ namespace NWD2DWG.Plugin
         }
 
         /// <summary>Запись XData (Extended Entity Data) — BIM-свойства</summary>
-        public void WriteXData(string layer, Dictionary<string, string> props)
+        // Свойства элемента как TEXT рядом с самой геометрией.
+        //
+        // Прежняя версия называлась WriteXData, но настоящим XDATA не была:
+        // группа 1001 требует регистрации APPID. Помимо этого она клала ВСЕ
+        // подписи в точку (0,0,0) — десятки тысяч наложенных TEXT в начале
+        // координат душили AutoCAD при наведении курсора — и писала до 2000
+        // символов в группу 1, где формат допускает максимум 255.
+        public void WriteElementProps(string layer, Dictionary<string, string> props,
+                                      double x, double y, double z)
         {
             if (props == null || props.Count == 0) return;
-            // XData для AC1009: пишем как TEXT entity с BIM-свойствами
-            // (полноценный XDATA с группой 1001 требует APPID registration в таблице TABLES)
-            _w.WriteLine("0");
-            _w.WriteLine("TEXT");
-            _w.WriteLine("8");
-            _w.WriteLine(SanitizeLayer(layer) + "_BIM");
-            _w.WriteLine("10");
-            _w.WriteLine("0.0");
-            _w.WriteLine("20");
-            _w.WriteLine("0.0");
-            _w.WriteLine("30");
-            _w.WriteLine("0.0");
-            _w.WriteLine("40");
-            _w.WriteLine("0.001"); // высота текста (минимальная, невидимая)
-            _w.WriteLine("1");
-            // Сериализуем свойства в одну строку
+
+            string bimLayer = SanitizeLayer(layer) + "_BIM";
+
             var sb = new StringBuilder();
             sb.Append("NWD2DWG_BIM:");
             int count = 0;
             foreach (var kv in props)
             {
+                string key = (kv.Key ?? "").Replace("|", "/").Replace("\n", " ").Replace("\r", " ");
+                string val = (kv.Value ?? "").Replace("|", "/").Replace("\n", " ").Replace("\r", " ");
+                if (key.Length + val.Length > 250) continue;
                 if (count > 0) sb.Append("|");
-                // Экранируем спецсимволы DXF
-                string key = kv.Key.Replace("|", "/").Replace("\n", " ");
-                string val = kv.Value.Replace("|", "/").Replace("\n", " ");
-                if (key.Length + val.Length > 250) continue; // DXF TEXT ограничен
                 sb.Append(key).Append("=").Append(val);
                 count++;
-                if (sb.Length > 2000) break; // Предел длины
+                if (sb.Length > 2000) break;
             }
-            _w.WriteLine(sb.ToString());
+            if (count == 0) return;
+
+            string text = sb.ToString();
+
+            _w.WriteLine("0");
+            _w.WriteLine("TEXT");
+            _w.WriteLine("8");
+            _w.WriteLine(bimLayer);
+            _w.WriteLine("10");
+            _w.WriteLine(x.ToString("G12", CultureInfo.InvariantCulture));
+            _w.WriteLine("20");
+            _w.WriteLine(y.ToString("G12", CultureInfo.InvariantCulture));
+            _w.WriteLine("30");
+            _w.WriteLine(z.ToString("G12", CultureInfo.InvariantCulture));
+            _w.WriteLine("40");
+            _w.WriteLine("0.001"); // высота текста (визуально не мешает)
+
+            // Группа 1 ограничена 255 символами; хвост уходит в группы 3
+            const int Chunk = 250;
+            if (text.Length <= Chunk)
+            {
+                _w.WriteLine("1");
+                _w.WriteLine(text);
+            }
+            else
+            {
+                for (int i = Chunk; i < text.Length; i += Chunk)
+                {
+                    _w.WriteLine("3");
+                    _w.WriteLine(text.Substring(i, Math.Min(Chunk, text.Length - i)));
+                }
+                _w.WriteLine("1");
+                _w.WriteLine(text.Substring(0, Chunk));
+            }
         }
 
         public void WritePostamble()

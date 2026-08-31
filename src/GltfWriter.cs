@@ -170,6 +170,10 @@ namespace NWD2DWG.Plugin
                 sb.Append("{");
                 sb.Append("\"asset\":{\"version\":\"2.0\",\"generator\":\"NWD2DWG\"},");
                 sb.Append("\"scene\":0,");
+                // Корень сцены — единственная нода 0 (RootNode), её children
+                // перечисляют все меш-ноды. По спецификации glTF ноды образуют
+                // непересекающиеся деревья, поэтому дочерние ноды НЕ должны
+                // одновременно перечисляться как корни сцены.
                 sb.Append("\"scenes\":[{\"nodes\":[0]}],");
                 sb.Append("\"nodes\":[" + string.Join(",", nodesJson) + "],");
                 sb.Append("\"materials\":[" + string.Join(",", materialsJson) + "],");
@@ -216,7 +220,9 @@ namespace NWD2DWG.Plugin
                 }
                 else
                 {
-                    File.WriteAllText(_outputPath, jsonString, Encoding.UTF8);
+                    // Encoding.UTF8 добавляет BOM, а JSON с BOM отвергают
+                    // glTF-Validator, three.js GLTFLoader и Blender-импортёр
+                    File.WriteAllText(_outputPath, jsonString, new UTF8Encoding(false));
                 }
             }
         }

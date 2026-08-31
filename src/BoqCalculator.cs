@@ -34,11 +34,46 @@ namespace NWD2DWG.Plugin
         /// <summary>
         /// Добавить геометрический фрагмент в расчет объемов
         /// </summary>
+        // Марка материала приходит из модели как её набрал проектировщик.
+        // На реальном объекте «Сталь 20» встретилась тремя написаниями сразу:
+        // «Сталь 20», «сталь 20» и «Cталь 20» с латинской C — и разошлась в
+        // ведомости на три позиции вместо одной. Латинские двойники кириллицы
+        // в русских марках — обычное дело: их набирают по привычке к
+        // английской раскладке, а на вид они неотличимы.
+        //
+        // Поэтому для группировки марка приводится к одному виду: латинские
+        // двойники заменяются кириллицей, регистр и лишние пробелы убираются.
+        // В саму ведомость при этом попадает первое встреченное написание —
+        // подменять то, что написал проектировщик, мы не вправе.
+        private static readonly string LatinLookalikes  = "ACEHKMOPTXBacepxyo";
+        private static readonly string CyrillicTwins    = "АСЕНКМОРТХВасерхуо";
+
+        internal static string MaterialKey(string material)
+        {
+            if (string.IsNullOrEmpty(material)) return "";
+            var sb = new StringBuilder(material.Length);
+            foreach (char c in material)
+            {
+                int i = LatinLookalikes.IndexOf(c);
+                char ch = i >= 0 ? CyrillicTwins[i] : c;
+                if (char.IsWhiteSpace(ch))
+                {
+                    if (sb.Length > 0 && sb[sb.Length - 1] != ' ') sb.Append(' ');
+                }
+                else sb.Append(char.ToLowerInvariant(ch));
+            }
+            return sb.ToString().Trim();
+        }
+
         public void AddMesh(string category, string name, string material, IList<double> verts, IList<int> quads)
         {
             if (verts == null || verts.Count < 9 || quads == null || quads.Count < 4) return;
 
-            string key = (category ?? "General") + "::" + (material ?? "Default");
+            // Приводить нужно обе части ключа. При группировке по материалу
+            // марка попадает и в категорию тоже: если привести только колонку
+            // материала, «Сталь 20» и «Cталь 20» с латинской C всё равно
+            // разойдутся по разным позициям — что и случилось на проверке.
+            string key = MaterialKey(category ?? "General") + "::" + MaterialKey(material ?? "Default");
             BoqItem item;
             if (!_items.TryGetValue(key, out item))
             {
@@ -108,14 +143,18 @@ namespace NWD2DWG.Plugin
         /// <summary>
         /// Экспорт сводной ведомости объемов работ в CSV (совместим с Excel)
         /// </summary>
-        public void ExportCsv(string csvPath)
+        public void ExportCsv(string csvPath) { ExportCsv(csvPath, 0.0); }
+
+        /// <summary>Позиции объёмом меньше minVolumeM3 в ведомость не попадают.</summary>
+        public void ExportCsv(string csvPath, double minVolumeM3)
         {
             var sb = new StringBuilder();
-            sb.AppendLine("Категория / Раздел;Материал;Кол-во элементов;Площадь (м2);Объем (м3);Примерная масса (т)");
+            sb.AppendLine("Категория / Раздел;Материал;Геом. фрагментов;Площадь (м2);Объем (м3);Примерная масса (т)");
 
             foreach (var kv in _items)
             {
                 var it = kv.Value;
+                if (minVolumeM3 > 0 && it.TotalVolumeM3 < minVolumeM3) continue;
                 sb.AppendLine(string.Format(CultureInfo.InvariantCulture,
                     "\"{0}\";\"{1}\";{2};{3:F2};{4:F3};{5:F2}",
                     it.Category, it.Material, it.ElementCount,
