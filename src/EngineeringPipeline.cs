@@ -110,7 +110,13 @@ namespace NWD2DWG.Plugin
 
         private void Note(string path, string what)
         {
-            if (!string.IsNullOrEmpty(path)) _produced.Add(new[] { path, what });
+            // В опись попадает только то, что действительно лежит на диске.
+            // Модуль может отработать вхолостую — например, в модели нет
+            // металлопроката, — и файла не будет. Раньше опись его всё равно
+            // обещала, и в папке недоставало обещанной ведомости.
+            if (string.IsNullOrEmpty(path)) return;
+            try { if (!File.Exists(path)) return; } catch { return; }
+            _produced.Add(new[] { path, what });
         }
 
         // Ведомость: приводим к профилю (кодировка, разделители, набор колонок)
@@ -143,7 +149,9 @@ namespace NWD2DWG.Plugin
             }
 
             Note(path, what);
-            return Path.GetFileName(path);
+            return File.Exists(path)
+                ? Path.GetFileName(path)
+                : Path.GetFileName(path) + " (нет данных — файл не создан)";
         }
 
         private string Dxf(string path, string what)
@@ -933,7 +941,10 @@ namespace NWD2DWG.Plugin
                 long size = 0;
                 try { if (File.Exists(it[0])) size = new FileInfo(it[0]).Length; } catch { }
                 w.AppendLine(string.Format(ci, "{0,3}. {1}", n, Path.GetFileName(it[0])));
-                w.AppendLine(string.Format(ci, "     {0} · {1:F0} КБ", it[1], size / 1024.0));
+                // «0 КБ» у ведомости на две строки выглядит как пустой файл
+                w.AppendLine(string.Format(ci, "     {0} · {1}", it[1],
+                    size >= 1024 ? string.Format(ci, "{0:F0} КБ", size / 1024.0)
+                                 : string.Format(ci, "{0} Б", size)));
             }
             w.AppendLine();
             w.AppendLine(new string('=', 78));

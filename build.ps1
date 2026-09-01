@@ -24,13 +24,37 @@ $nwDirs = @(
     "C:\Program Files\Autodesk\Navisworks Manage 2025",
     "C:\Program Files\Autodesk\Navisworks Manage 2024"
 )
-$nwDir = $nwDirs | Where-Object { Test-Path (Join-Path $_ "Autodesk.Navisworks.Api.dll") } | Select-Object -First 1
-if (-not $nwDir) {
-    # Поиск любой папки Navisworks
-    $found = Get-ChildItem "C:\Program Files\Autodesk" -Filter "Navisworks*" -Directory -ErrorAction SilentlyContinue |
-             Where-Object { Test-Path (Join-Path $_.FullName "Autodesk.Navisworks.Api.dll") } | Select-Object -First 1
-    if ($found) { $nwDir = $found.FullName }
+# Плагин связан с версией API на этапе компиляции: собранный под одно
+# поколение в другом не загрузится. Поэтому собираем его под КАЖДУЮ найденную
+# установку и вкладываем все в exe — программа выберет нужный при запуске.
+#
+# Freedom пропускаем: у него нет Automation API.
+$nwAll = @()
+foreach ($adsk in "C:\Program Files\Autodesk", "C:\Program Files (x86)\Autodesk") {
+    if (-not (Test-Path $adsk)) { continue }
+    foreach ($d in Get-ChildItem $adsk -Directory -Filter "Navisworks*" -ErrorAction SilentlyContinue) {
+        if ($d.Name -match 'Freedom|Exporters') { continue }
+        $api = Join-Path $d.FullName "Autodesk.Navisworks.Api.dll"
+        if (-not (Test-Path $api)) { continue }
+        $major = [Reflection.AssemblyName]::GetAssemblyName($api).Version.Major
+        if ($nwAll.major -contains $major) { continue }
+        $nwAll += [pscustomobject]@{ dir = $d.FullName; major = $major; name = $d.Name }
+    }
 }
+# Дополнительно: заранее выложенные сборки в refs\<версия>\ — на случай, когда
+# нужная версия Navisworks на машине сборки не установлена.
+$refsRoot = Join-Path $root 'refs'
+if (Test-Path $refsRoot) {
+    foreach ($d in Get-ChildItem $refsRoot -Directory) {
+        $api = Join-Path $d.FullName "Autodesk.Navisworks.Api.dll"
+        if (-not (Test-Path $api)) { continue }
+        $major = [Reflection.AssemblyName]::GetAssemblyName($api).Version.Major
+        if ($nwAll.major -contains $major) { continue }
+        $nwAll += [pscustomobject]@{ dir = $d.FullName; major = $major; name = "refs\" + $d.Name }
+    }
+}
+$nwAll = @($nwAll | Sort-Object major)
+$nwDir = if ($nwAll.Count -gt 0) { $nwAll[-1].dir } else { $null }
 
 # 1. Сборка NWD2DWG.Plugin.dll
 Write-Host "--- Сборка NWD2DWG.Plugin.dll ---"
@@ -101,12 +125,45 @@ $pluginArgs = @(
 ) + $pluginRefArgs + $pluginSrcArgs
 
 $pluginBuilt = $false
-if ($nwDir) {
-    & dotnet $pluginArgs
-    if ($LASTEXITCODE -ne 0) { throw "Компиляция плагина завершилась с кодом $LASTEXITCODE" }
-    $pSize = (Get-Item $outPlugin).Length
-    Write-Host "Собран плагин: $outPlugin ($([math]::Round($pSize/1KB)) КБ)"
-    $pluginBuilt = $true
+$pluginFiles = @()          # (путь, версияAPI) — всё, что вложим в exe
+
+if ($nwAll.Count -gt 0) {
+    foreach ($nw in $nwAll) {
+        $dllOut = Join-Path $dist ("NWD2DWG.Plugin.{0}.dll" -f $nw.major)
+        $refs = @(
+            "$refDir\mscorlib.dll", "$refDir\System.dll", "$refDir\System.Core.dll",
+            "$refDir\System.IO.Compression.dll", "$refDir\System.IO.Compression.FileSystem.dll",
+            "$refDir\System.Xml.dll", "$refDir\Microsoft.CSharp.dll",
+            "$refDir\System.Drawing.dll", "$refDir\System.Windows.Forms.dll",
+            "$refDir\System.Security.dll"
+        )
+        foreach ($d in 'Autodesk.Navisworks.Api','Autodesk.Navisworks.ComApi',
+                       'Autodesk.Navisworks.Interop.ComApi','Autodesk.Navisworks.Clash',
+                       'Autodesk.Navisworks.Timeliner') {
+            $p = Join-Path $nw.dir "$d.dll"
+            if (Test-Path $p) { $refs += $p }
+        }
+        $args = @("`"$($csc.FullName)`"", '/nologo','/nostdlib+','/langversion:latest',
+                  '/optimize+','/checked-','/target:library','/platform:anycpu',
+                  '/warn:4','/utf8output', "/out:`"$dllOut`"")
+        $args += ($refs | ForEach-Object { "/r:`"$_`"" })
+        $args += ($pluginSources | ForEach-Object { "`"$_`"" })
+
+        & dotnet $args
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host ("ВНИМАНИЕ: плагин под {0} (API {1}) не собрался — пропущен" -f $nw.name, $nw.major)
+            continue
+        }
+        $kb = [math]::Round((Get-Item $dllOut).Length/1KB)
+        Write-Host ("Собран плагин под {0} (API {1}): {2} КБ" -f $nw.name, $nw.major, $kb)
+        $pluginFiles += [pscustomobject]@{ path = $dllOut; major = $nw.major }
+        $pluginBuilt = $true
+    }
+    # Плагин самой свежей версии остаётся и под общим именем: он подхватится,
+    # если версия установленного Navisworks почему-то не определилась.
+    if ($pluginFiles.Count -gt 0) {
+        Copy-Item $pluginFiles[-1].path $outPlugin -Force
+    }
 } else {
     # NwdPlugin.cs жёстко ссылается на Autodesk.Navisworks.Api, поэтому без
     # установленного Navisworks (например, на раннере CI) плагин не собрать.
@@ -166,7 +223,14 @@ $exeArgs = @(
     "/win32icon:`"$(Join-Path $src 'NWD2DWG.ico')`"",
     "/out:`"$outExe`""
 )
-if ($pluginBuilt) { $exeArgs += "/resource:`"$outPlugin`",NWD2DWG.Plugin.dll" }
+if ($pluginBuilt) {
+    $exeArgs += "/resource:`"$outPlugin`",NWD2DWG.Plugin.dll"
+    foreach ($p in $pluginFiles) {
+        $exeArgs += "/resource:`"$($p.path)`",NWD2DWG.Plugin.$($p.major).dll"
+    }
+    Write-Host ("Вложено плагинов: {0} (API {1})" -f $pluginFiles.Count,
+                (($pluginFiles | ForEach-Object { $_.major }) -join ', '))
+}
 $exeArgs = $exeArgs + $refArgs + $exeSrcArgs
 
 & dotnet $exeArgs
@@ -198,12 +262,29 @@ New-Item -ItemType Directory -Path (Join-Path $pkgDir "src") | Out-Null
 Copy-Item $outExe $pkgDir -Force
 if ($pluginBuilt) { Copy-Item $outPlugin $pkgDir -Force }
 if (Test-Path $readmeRu) { Copy-Item $readmeRu $pkgDir -Force }
-# Руководство пользователя (PDF) кладём в релиз, если оно собрано
-$manual = Join-Path (Split-Path -Parent $root) 'NWD2DWG_Руководство_пользователя.pdf'
-if (Test-Path $manual) { Copy-Item $manual $pkgDir -Force }
+# Пользовательская документация: руководство и сценарии работы
+$upDir = Split-Path -Parent $root
+foreach ($doc in 'NWD2DWG_Руководство_пользователя.pdf', 'Сценарии_использования.pdf', 'проверка.ps1') {
+    $p = Join-Path $upDir $doc
+    if (Test-Path $p) { Copy-Item $p $pkgDir -Force }
+}
+if (Test-Path $readmeMd) { Copy-Item $readmeMd $pkgDir -Force }
 Copy-Item $licFile $pkgDir -Force
 Copy-Item $buildScript $pkgDir -Force
+# Всё, чем собирается проект: лицензия обязывает отдавать средства сборки,
+# а не только исходники самой программы.
+foreach ($extra in 'run_tests.ps1', 'build_installer.ps1', 'tests_RegressionTests.cs') {
+    $p = Join-Path $root $extra
+    if (Test-Path $p) { Copy-Item $p $pkgDir -Force }
+}
 Copy-Item (Join-Path $src "*.*") (Join-Path $pkgDir "src") -Force
+
+# Исходники установщика и деинсталлятора
+$instSrc = Join-Path $root 'installer'
+if (Test-Path $instSrc) {
+    New-Item -ItemType Directory -Path (Join-Path $pkgDir "installer") | Out-Null
+    Copy-Item (Join-Path $instSrc "*.*") (Join-Path $pkgDir "installer") -Force
+}
 
 # MCP-сервер: управление программой из внешнего клиента, зависимостей не имеет
 $mcpSrc = Join-Path $root 'mcp'

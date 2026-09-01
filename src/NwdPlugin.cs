@@ -349,6 +349,7 @@ namespace NWD2DWG.Plugin
                 {
                     log("--- Запуск экспорта по разделам (XREF) ---");
                     int sectionCount = 0;
+                    long splitBytes = 0;
                     string baseOutDir = Path.GetDirectoryName(outPath) ?? ".";
                     string baseOutName = Path.GetFileNameWithoutExtension(outPath);
 
@@ -393,7 +394,7 @@ namespace NWD2DWG.Plugin
                                     secItems++;
                                     totalItems++;
 
-                                    if (skipHidden && item.IsHidden)
+                                    if (skipHidden && IsHiddenDeep(item))
                                     {
                                         hiddenSkipped++;
                                         continue;
@@ -432,6 +433,14 @@ namespace NWD2DWG.Plugin
 
                                     // === BIM свойства (XData) ===
                                     Dictionary<string, string> bimProps = extractProperties != null ? extractProperties(item) : null;
+
+                                    // Имя и материал нужны инженерным модулям — ВОР,
+                                    // ведомости КМ, расчёту масс. При разбивке по
+                                    // разделам они раньше не собирались вовсе.
+                                    string itemName = "";
+                                    try { itemName = item.DisplayName ?? ""; } catch { }
+                                    string matName = "";
+                                    if (bimProps != null) matName = MaterialFromProps(bimProps);
 
                                     string layer = layersPerItem
                                         ? (!string.IsNullOrEmpty(item.DisplayName) ? item.DisplayName : cleanName)
@@ -473,6 +482,11 @@ namespace NWD2DWG.Plugin
                                                 if (currentQuads.Count == 0) continue;
                                             }
 
+                                            // === Геосдвиг к нулю ===
+                                            // до расчётов и записи, иначе побочные
+                                            // файлы окажутся в других координатах
+                                            eng.ApplyShift(currentVerts);
+
                                             // === Mesh Decimation ===
                                             if (decimatePercent > 0 && decimatePercent <= 90)
                                             {
@@ -488,22 +502,33 @@ namespace NWD2DWG.Plugin
                                             totalVertices += currentVerts.Count / 3;
 
                                             // === Solid Detection ===
+                                            // Распознанное тело раньше делало continue и
+                                            // уносило с собой и расчёты, и свойства элемента.
+                                            SolidResult solid = null;
+                                            bool solidWritten = false;
                                             if (solidDetect)
                                             {
-                                                SolidResult solid = SolidReconstructor.TryReconstruct(currentVerts, currentQuads);
+                                                solid = SolidReconstructor.TryReconstruct(currentVerts, currentQuads);
                                                 if (solid != null && solid.Type != SolidType.None && solid.Confidence > 0.7)
                                                 {
                                                     SolidReconstructor.WriteSolidDxf(secWriter.RawWriter, solid, PluginDxfWriter.SanitizeLayer(layer), rgb);
-                                                    continue;
+                                                    solidWritten = true;
                                                 }
                                             }
 
-                                            secBatcher.AddGeometry(layer, rgb, currentVerts, currentQuads, transparency);
+                                            // === Инженерные расчёты по элементу ===
+                                            if (engOpt.AnyGeometryConsumer)
+                                                eng.OnElement(itemName, layer, matName, currentVerts, currentQuads, solid);
 
-                                            // === XData ===
-                                            if (bimProps != null && bimProps.Count > 0)
+                                            if (!solidWritten)
+                                                secBatcher.AddGeometry(layer, rgb, currentVerts, currentQuads, transparency);
+
+                                            // === XData (после анонимизации) ===
+                                            var outProps = bimProps != null && bimProps.Count > 0
+                                                ? eng.FilterProps(bimProps) : null;
+                                            if (outProps != null && outProps.Count > 0)
                                             {
-                                                secWriter.WriteElementProps(PluginDxfWriter.SanitizeLayer(layer), bimProps,
+                                                secWriter.WriteElementProps(PluginDxfWriter.SanitizeLayer(layer), outProps,
                                                     currentVerts.Count >= 3 ? currentVerts[0] : 0.0,
                                                     currentVerts.Count >= 3 ? currentVerts[1] : 0.0,
                                                     currentVerts.Count >= 3 ? currentVerts[2] : 0.0);
@@ -517,12 +542,41 @@ namespace NWD2DWG.Plugin
                             }
 
                             FileInfo secFi = new FileInfo(sectionOutPath);
+                            splitBytes += secFi.Length;
                             log(string.Format("Раздел {0} готов: {1:F2} МБ | полигонов: {2}", Path.GetFileName(sectionOutPath), secFi.Length / 1048576.0, secTris));
                         }
                     }
 
                     log(string.Format("ГОТОВО (по разделам): разделов: {0}, полигонов всего: {1} | время: {2}",
                         sectionCount, totalTriangles, sw.Elapsed));
+
+                    // Ведомости, индекс ревизии и протокол — общие на всю модель,
+                    // а не на раздел. Раньше сюда просто не доходили: ветка
+                    // разбивки заканчивалась возвратом до конвейера, и папки с
+                    // расчётами не появлялись вообще.
+                    try
+                    {
+                        string engSplit = eng.Finish();
+                        if (!string.IsNullOrEmpty(engSplit))
+                            foreach (string line in engSplit.Split('\n'))
+                                if (!string.IsNullOrEmpty(line.Trim())) log(line.TrimEnd());
+                    }
+                    catch (Exception eex) { log("Инженерные модули: ОШИБКА " + eex.Message); }
+
+                    // Итоговую строку разбирает программа снаружи: без неё в окне
+                    // показывались нули, хотя разделы выгружены.
+                    log(string.Format(CultureInfo.InvariantCulture,
+                        "ГОТОВО: {0} | элементов: {1}, фрагментов: {2}, треугольников: {3}, вершин: {4} | размер: {5:F2} МБ | время: {6}",
+                        Path.GetFileName(outPath), totalItems, totalFragments, totalTriangles,
+                        totalVertices, splitBytes / 1048576.0, sw.Elapsed));
+
+                    try
+                    {
+                        Application.MainDocument.Clear();
+                        log("документ выгружен, экземпляр свободен для следующей модели");
+                    }
+                    catch (Exception cex) { log("выгрузить документ не удалось: " + cex.Message); }
+
                     return 0;
                 }
 
@@ -589,7 +643,7 @@ namespace NWD2DWG.Plugin
                         {
                             totalItems++;
 
-                            if (skipHidden && item.IsHidden)
+                            if (skipHidden && IsHiddenDeep(item))
                             {
                                 hiddenSkipped++;
                                 continue;
@@ -943,6 +997,31 @@ namespace NWD2DWG.Plugin
             }
         }
 
+        /// <summary>
+        /// Скрыт ли элемент с учётом родителей.
+        ///
+        /// «Скрыть невыбранные» в Navisworks помечает узлы дерева, а не каждый
+        /// лист геометрии: у листа IsHidden остаётся false, хотя на экране его
+        /// уже нет. Проверка только по самому элементу поэтому исправно
+        /// выгружала всё спрятанное — на модели с одним видимым краном
+        /// в чертёж уходили именно скрытые трубопроводы.
+        /// </summary>
+        static bool IsHiddenDeep(ModelItem item)
+        {
+            try
+            {
+                foreach (ModelItem a in item.AncestorsAndSelf)
+                    if (a.IsHidden) return true;
+            }
+            catch
+            {
+                // Дерево иногда не отдаёт предков (битая ссылка на вложенный
+                // файл) — тогда судим хотя бы по самому элементу.
+                try { return item.IsHidden; } catch { }
+            }
+            return false;
+        }
+
         // --------------------------------------------------------------------
         // Оси и уровни здания из DocumentGrids.
         // Уровни (GridLevel.Elevation) API отдаёт честно. Геометрию самих
@@ -1060,7 +1139,7 @@ namespace NWD2DWG.Plugin
                     if (root == null) continue;
                     foreach (ModelItem item in root.DescendantsAndSelf)
                     {
-                        if (skipHidden && item.IsHidden) continue;
+                        if (skipHidden && IsHiddenDeep(item)) continue;
                         if (!item.HasGeometry) continue;
 
                         InwOaPath3 oaPath = null;
@@ -1154,8 +1233,26 @@ namespace NWD2DWG.Plugin
             if (Math.Abs(r.Distance) < cfg.ClashMinDistanceMm / 1000.0 * UnitScaleGuess(r))
             { skipped++; return; }
 
+            // Ответственный за коллизию описан по-разному в разных поколениях:
+            // до 2021 включительно это строка, начиная с более поздних —
+            // объект с DisplayName. Через object компилируется и там, и там,
+            // а тип разбирается уже во время работы.
             string assignee = "";
-            try { if (r.AssignedTo != null) assignee = r.AssignedTo.DisplayName; } catch { }
+            try
+            {
+                object who = r.AssignedTo;
+                if (who != null)
+                {
+                    assignee = who as string;
+                    if (assignee == null)
+                    {
+                        var p = who.GetType().GetProperty("DisplayName");
+                        if (p != null) assignee = p.GetValue(who, null) as string;
+                    }
+                    assignee = assignee ?? "";
+                }
+            }
+            catch { }
             DateTime created = r.CreatedTime.HasValue ? r.CreatedTime.Value : DateTime.Now;
 
             eng.AddClash(r.Center.X, r.Center.Y, r.Center.Z, r.Distance,

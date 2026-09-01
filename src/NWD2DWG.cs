@@ -1241,33 +1241,117 @@ namespace NWD2DWG
 
     public class NavisConverter
     {
+        /// <summary>Старшая версия API установленного Navisworks (0 — неизвестно).</summary>
+        public static int ApiMajor;
+
+        /// <summary>
+        /// Старшая версия API установленного Navisworks: 17 — это 2020,
+        /// 18 — 2021, 23 — 2026. По ней выбирается подходящий плагин.
+        /// </summary>
+        public static int ApiMajorOf(string nwDir)
+        {
+            try
+            {
+                string api = Path.Combine(nwDir ?? "", "Autodesk.Navisworks.Api.dll");
+                if (!File.Exists(api)) return 0;
+                return AssemblyName.GetAssemblyName(api).Version.Major;
+            }
+            catch { return 0; }
+        }
+
+        /// <summary>
+        /// Под какую версию API собран файл плагина (0 — определить не удалось).
+        /// Ссылка на Autodesk.Navisworks.Api читается без запуска кода сборки.
+        /// </summary>
+        public static int PluginApiMajorOf(string path)
+        {
+            try
+            {
+                foreach (var r in Assembly.ReflectionOnlyLoadFrom(path).GetReferencedAssemblies())
+                    if (string.Equals(r.Name, "Autodesk.Navisworks.Api", StringComparison.OrdinalIgnoreCase))
+                        return r.Version.Major;
+            }
+            catch { }
+            return 0;
+        }
+
         public static string EnsurePluginDll()
         {
-            // 1) Рядом с EXE
+            // 1) Файл рядом с программой (и в подпапке dist) — так плагин можно
+            //    подменить при отладке, не пересобирая exe. Имя с номером версии
+            //    в приоритете: рядом могут лежать плагины сразу под несколько
+            //    поколений Navisworks.
             string exeDir = AppDomain.CurrentDomain.BaseDirectory;
-            string dllPath = Path.Combine(exeDir, "NWD2DWG.Plugin.dll");
-            if (File.Exists(dllPath)) return Path.GetFullPath(dllPath);
+            foreach (string dir in new[] { exeDir, Path.Combine(exeDir, "dist") })
+            {
+                if (ApiMajor > 0)
+                {
+                    string byVer = Path.Combine(dir, "NWD2DWG.Plugin." +
+                        ApiMajor.ToString(CultureInfo.InvariantCulture) + ".dll");
+                    if (File.Exists(byVer))
+                    {
+                        Log.Write("плагин с диска: " + byVer + " (API Navisworks " + ApiMajor + ")");
+                        return Path.GetFullPath(byVer);
+                    }
+                }
 
-            // 2) В подпапке dist
-            string distPath = Path.Combine(exeDir, "dist", "NWD2DWG.Plugin.dll");
-            if (File.Exists(distPath)) return Path.GetFullPath(distPath);
+                string plain = Path.Combine(dir, "NWD2DWG.Plugin.dll");
+                if (!File.Exists(plain)) continue;
+
+                // Плагин чужого поколения брать нельзя: Navisworks откажется его
+                // загружать с невнятной жалобой на версию сборки. Тише и полезнее
+                // пропустить его и взять вложенный в программу — нужной версии.
+                int fileApi = PluginApiMajorOf(plain);
+                if (ApiMajor > 0 && fileApi > 0 && fileApi != ApiMajor)
+                {
+                    Log.Write("пропущен " + plain + ": собран под API " + fileApi +
+                              ", а установлен Navisworks с API " + ApiMajor);
+                    continue;
+                }
+                Log.Write("плагин с диска: " + plain +
+                          (fileApi > 0 ? " (API Navisworks " + fileApi + ")" : ""));
+                return Path.GetFullPath(plain);
+            }
 
             // 3) Извлечение из встроенных ресурсов в %TEMP%\NWD2DWG\NWD2DWG.Plugin.dll
             string tempDir = Path.Combine(Path.GetTempPath(), "NWD2DWG");
             if (!Directory.Exists(tempDir)) Directory.CreateDirectory(tempDir);
             string tempDll = Path.Combine(tempDir, "NWD2DWG.Plugin.dll");
 
+            // Плагин связан с версией API на этапе компиляции: собранный под
+            // 2026 в 2020-й просто не загрузится — перенаправление версий у
+            // Navisworks не выходит за пределы своего поколения. Поэтому в
+            // программу вложены плагины под каждую поддержанную версию, и
+            // здесь выбирается тот, что подходит установленной.
             var asm = Assembly.GetExecutingAssembly();
-            using (var s = asm.GetManifestResourceStream("NWD2DWG.Plugin.dll"))
+            string exact = ApiMajor > 0
+                ? "NWD2DWG.Plugin." + ApiMajor.ToString(CultureInfo.InvariantCulture) + ".dll"
+                : null;
+
+            foreach (string res in new[] { exact, "NWD2DWG.Plugin.dll" })
             {
-                if (s != null)
+                if (res == null) continue;
+                using (var s = asm.GetManifestResourceStream(res))
                 {
+                    if (s == null) continue;
                     using (var fs = new FileStream(tempDll, FileMode.Create, FileAccess.Write))
-                    {
                         s.CopyTo(fs);
-                    }
+                    Log.Write("плагин из ресурса " + res +
+                              (ApiMajor > 0 ? " (API Navisworks " + ApiMajor + ")" : ""));
                     return tempDll;
                 }
+            }
+
+            // Ни точного, ни запасного не нашлось — говорим прямо, что делать.
+            if (ApiMajor > 0)
+            {
+                var есть = new List<string>();
+                foreach (string n in asm.GetManifestResourceNames())
+                    if (n.StartsWith("NWD2DWG.Plugin", StringComparison.Ordinal)) есть.Add(n);
+                throw new Exception(
+                    "В программу не вложен плагин под установленный Navisworks (API " + ApiMajor + "). " +
+                    "Вложены: " + (есть.Count > 0 ? string.Join(", ", есть.ToArray()) : "нет ни одного") + ". " +
+                    "Пересоберите программу на машине с этой версией: build.ps1 соберёт плагин сам.");
             }
 
             if (File.Exists(tempDll)) return tempDll;
@@ -1548,6 +1632,77 @@ namespace NWD2DWG
             foreach (string f in Directory.GetFiles(dir, bas + "_*.dxf")) yield return f;
         }
 
+        /// <summary>
+        /// Если в папке модели нет права записи, отдаёт путь к временной копии.
+        /// Navisworks такую модель не открывает: связь обрывается на первом же
+        /// действии. Проверено на образцах в Program Files — три обрыва из трёх,
+        /// а тот же файл из обычной папки конвертируется за полсекунды. Судя по
+        /// всему, Navisworks пишет что-то рядом с моделью и падает, если не может.
+        /// </summary>
+        private static string CopyIfFolderReadOnly(string input, string runDir, Action<string> status)
+        {
+            try
+            {
+                string dir = Path.GetDirectoryName(Path.GetFullPath(input));
+                if (string.IsNullOrEmpty(dir)) return input;
+
+                // Право записи проверяется попыткой записи: атрибуты и ACL врут
+                // и на сетевых шарах, и на защищённых системных папках.
+                string probe = Path.Combine(dir,
+                    "nwd2dwg_" + Guid.NewGuid().ToString("N").Substring(0, 8) + ".tmp");
+                try
+                {
+                    using (new FileStream(probe, FileMode.CreateNew, FileAccess.Write)) { }
+                    File.Delete(probe);
+                    return input;
+                }
+                catch (UnauthorizedAccessException) { }
+                catch (IOException) { }
+                catch (System.Security.SecurityException) { }
+
+                // .nwf ссылается на соседние файлы: копия без них бесполезна,
+                // поэтому здесь только предупреждаем.
+                string ext = (Path.GetExtension(input) ?? "").ToLowerInvariant();
+                if (ext != ".nwd" && ext != ".nwc")
+                {
+                    string нота = "папка модели доступна только для чтения, а " + ext +
+                                  " копировать нельзя — он ссылается на соседние файлы. " +
+                                  "Скопируйте модель вместе со связанными файлами в обычную папку.";
+                    Log.Write(нота);
+                    if (status != null) status("ВНИМАНИЕ: " + нота);
+                    return input;
+                }
+
+                long size = new FileInfo(input).Length;
+                long free = 0;
+                try { free = new DriveInfo(Path.GetPathRoot(Path.GetFullPath(runDir))).AvailableFreeSpace; }
+                catch { }
+                if (free > 0 && size + (1L << 30) > free)
+                {
+                    Log.Write("папка модели только для чтения, но на копию не хватает места: нужно " +
+                              (size >> 20) + " МБ, свободно " + (free >> 20) + " МБ");
+                    if (status != null)
+                        status("ВНИМАНИЕ: папка модели только для чтения, а места на временную копию не хватает — возможен обрыв связи");
+                    return input;
+                }
+
+                string copy = Path.Combine(runDir, Path.GetFileName(input));
+                if (status != null) status("Папка модели только для чтения — делаю временную копию...");
+                File.Copy(input, copy, true);
+                Log.Write("модель скопирована во временную папку (" +
+                          (size >= (1L << 20) ? (size >> 20) + " МБ" : (size >> 10) + " КБ") +
+                          "): в исходной папке нет права записи, а из такой папки " +
+                          "Navisworks обрывает связь при открытии");
+                return copy;
+            }
+            catch (Exception ex)
+            {
+                // Обход не обязателен: не вышло — просто идём обычным путём.
+                Log.Write("проверка права записи в папке модели не удалась: " + ex.Message);
+                return input;
+            }
+        }
+
         public static ConvertStats ConvertFile(AppOptions opts, string input, string outPath,
                                                Action<string> status, Action<double> progress,
                                                Func<bool> cancelled)
@@ -1563,6 +1718,7 @@ namespace NWD2DWG
             if (!loader.Load(nwDir))
                 throw new Exception("Не удалось загрузить API Navisworks из папки " + nwDir + ": " + loader.LastError);
 
+            ApiMajor = ApiMajorOf(nwDir);
             string pluginDll = EnsurePluginDll();
             Log.Write("плагин Navisworks: " + pluginDll);
 
@@ -1575,6 +1731,9 @@ namespace NWD2DWG
             string runDir = Path.Combine(Path.GetTempPath(), "NWD2DWG",
                                          "run_" + Guid.NewGuid().ToString("N").Substring(0, 12));
             try { Directory.CreateDirectory(runDir); } catch { }
+
+            // Копия делается в runDir: она удалится вместе с ним в finally.
+            input = CopyIfFolderReadOnly(input, runDir, status);
 
             string targetDxf = outPath;
             bool isDwg = opts.Format == OutFormat.Dwg;
@@ -4658,11 +4817,9 @@ namespace NWD2DWG
 
             _cbGeoShift = StyleCheckBox(new CheckBox { Text = "Сдвиг к нулю (0,0,0) + .wld", Checked = true, Dock = DockStyle.Fill });
             _cbGrids = StyleCheckBox(new CheckBox { Text = "Уровни этажей (_LEVELS)", Checked = true, Dock = DockStyle.Fill });
-            _tips.SetToolTip(_cbGrids, "Выгружаются высотные отметки этажей. Геометрию координационных осей публичный API Navisworks не отдаёт.");
             _cbPipeTrace = StyleCheckBox(new CheckBox { Text = "Оси труб (DN/L)", Checked = false, Dock = DockStyle.Fill });
             _cbBoq = StyleCheckBox(new CheckBox { Text = "Смета ВОР в Excel/CSV", Checked = false, Dock = DockStyle.Fill });
             _cbBcf = StyleCheckBox(new CheckBox { Text = "Коллизии BCF 2.1", Checked = false, Dock = DockStyle.Fill });
-            _tips.SetToolTip(_cbBcf, "Выгружает сохранённые проверки Clash Detective в пакет BCF 2.1. Если проверок в модели нет, программа сообщает об этом в журнале.");
             _cbAnonymize = StyleCheckBox(new CheckBox { Text = "Анонимизация свойств", Checked = false, Dock = DockStyle.Fill });
             pV3Grid.Controls.Add(_cbGeoShift, 0, 0);
             pV3Grid.Controls.Add(_cbGrids, 1, 0);
@@ -4697,7 +4854,6 @@ namespace NWD2DWG
             pV4Grid.RowStyles.Add(new RowStyle(SizeType.Absolute, 28));
 
             _cbClashCluster = StyleCheckBox(new CheckBox { Text = "Кластеризация коллизий (DBSCAN)", Checked = false, Dock = DockStyle.Fill });
-            _tips.SetToolTip(_cbClashCluster, "Группирует коллизии Clash Detective по трассам, отсекая дубли. Радиус ε задаётся в параметрах модулей.");
             _cbSectionPlan = StyleCheckBox(new CheckBox { Text = "2D поэтажный план (Z-срез)", Checked = false, Dock = DockStyle.Fill });
             _cbCadPurge = StyleCheckBox(new CheckBox { Text = "Глубокая чистка DXF (Purge)", Checked = false, Dock = DockStyle.Fill });
             _cbPenetrations = StyleCheckBox(new CheckBox { Text = "Авторасстановка гильз (DN+50)", Checked = false, Dock = DockStyle.Fill });
@@ -4706,10 +4862,8 @@ namespace NWD2DWG
             _cbCog = StyleCheckBox(new CheckBox { Text = "Центр масс блока (CoG Гаусс)", Checked = false, Dock = DockStyle.Fill });
             _cbIso = StyleCheckBox(new CheckBox { Text = "Изометрия трубопроводов ГОСТ", Checked = false, Dock = DockStyle.Fill });
             _cbSchedule4D = StyleCheckBox(new CheckBox { Text = "4D статус по графику", Checked = false, Dock = DockStyle.Fill });
-            _tips.SetToolTip(_cbSchedule4D, "Берёт задачи из TimeLiner модели (или из файла MS Project / CSV по ключу --schedule) и считает отставание на дату среза.");
             _cbShrinkwrap = StyleCheckBox(new CheckBox { Text = "Защита IP (OBB-оболочки)", Checked = false, Dock = DockStyle.Fill });
             _cbRoomFinish = StyleCheckBox(new CheckBox { Text = "Ведомость отделки ГОСТ 21.501", Checked = false, Dock = DockStyle.Fill });
-            _tips.SetToolTip(_cbRoomFinish, "Помещения определяются по замкнутым контурам горизонтального среза. Пороги площади задаются в параметрах модулей.");
             pV4Grid.Controls.Add(_cbClashCluster, 0, 0);
             pV4Grid.Controls.Add(_cbSectionPlan, 1, 0);
             pV4Grid.Controls.Add(_cbCadPurge, 2, 0);
@@ -4721,6 +4875,9 @@ namespace NWD2DWG
             pV4Grid.Controls.Add(_cbSchedule4D, 2, 2);
             var btnModuleSettings = StyleButton(new Button { Text = "⚙  Параметры модулей…", Dock = DockStyle.Fill, Height = 26 }, false);
             btnModuleSettings.Click += (s, e) => OpenModuleSettings();
+
+            // Подсказки вешаем здесь: к этому моменту созданы все переключатели.
+            SetupTooltips();
 
             pV4Grid.Controls.Add(_cbShrinkwrap, 0, 3);
             pV4Grid.Controls.Add(_cbRoomFinish, 1, 3);
@@ -5110,6 +5267,145 @@ namespace NWD2DWG
                 dlg.StartPosition = FormStartPosition.CenterParent;
                 dlg.ShowDialog(this);
             }
+        }
+
+
+        /// <summary>
+        /// Подсказки при наведении. Каждая отвечает на один вопрос: что я получу,
+        /// если поставлю галочку, — и на чём это видно. Текст держим здесь целиком,
+        /// чтобы он не расползался по коду вперемешку с вёрсткой.
+        /// </summary>
+        void SetupTooltips()
+        {
+            // --- откуда и куда --------------------------------------------
+            _tips.SetToolTip(_tbInput,
+                "Модель Navisworks: .nwd, .nwc или .nwf.\n" +
+                "Пример: C:\\Проекты\\1055\\Рабочая.nwd");
+            _tips.SetToolTip(_tbOutput,
+                "Куда сложить результат. Пусто — рядом с исходной моделью.\n" +
+                "Ведомости и протокол лягут в подпапки 02_Ведомости и 04_Протокол.");
+            _tips.SetToolTip(_cbBatch,
+                "Обработать все модели из папки подряд, а не один файл.\n" +
+                "Пример: папка с 30 файлами разделов — получите 30 чертежей за один запуск.");
+
+            // --- форматы ---------------------------------------------------
+            _tips.SetToolTip(_rbPolyface,
+                "DXF с сеткой Polyface. Компактнее всего, открывается везде.\n" +
+                "Берите, если чертёж нужен просто для подложки.");
+            _tips.SetToolTip(_rb3dFace,
+                "DXF отдельными гранями 3DFACE. Тяжелее Polyface, зато каждую грань\n" +
+                "можно выделить и удалить в AutoCAD поштучно.");
+            _tips.SetToolTip(_rbDwg,
+                "Сразу DWG — программа прогонит DXF через установленный AutoCAD.\n" +
+                "Без AutoCAD на машине не сработает.");
+            _tips.SetToolTip(_rbGltf,
+                "glTF/GLB для показа в браузере, на планшете и в VR.\n" +
+                "Единственный формат здесь, который несёт сглаживание: модель\n" +
+                "выглядит так же гладко, как в Navisworks.");
+            _tips.SetToolTip(_rbIfc,
+                "IFC 2x3 для передачи в Revit, Tekla, Renga и экспертизу.\n" +
+                "Геометрия проще, но свойства элементов сохраняются.");
+
+            // --- базовые параметры ------------------------------------------
+            _tips.SetToolTip(_cbSplit,
+                "Каждый подгруженный файл модели выгружается отдельным чертежом.\n" +
+                "Пример: в .nwd подшиты АР, КЖ и ОВ — выйдет три DWG вместо одного\n" +
+                "неподъёмного. Ведомости при этом общие на всю модель.");
+            _tips.SetToolTip(_cbSkipHidden,
+                "Не выгружать то, что скрыто в модели, — вместе со скрытыми родителями.\n" +
+                "Важно: скрытие мышкой в открытом окне Navisworks нигде не сохраняется.\n" +
+                "Чтобы оно учлось, файл после скрытия надо сохранить.");
+            _tips.SetToolTip(_cbShowNw,
+                "Показать окно Navisworks во время работы. Медленнее, зато видно,\n" +
+                "на чём программа встала, если что-то пошло не так.");
+            _tips.SetToolTip(_cbColors,
+                "Перенести цвета элементов из модели в чертёж.\n" +
+                "Снимите, если нужен одноцветный чертёж под печать.");
+            _tips.SetToolTip(_cbLayers,
+                "Каждый элемент — на свой слой с его именем.\n" +
+                "Удобно гасить лишнее в AutoCAD, но на крупной модели слоёв\n" +
+                "будут тысячи и файл откроется заметно медленнее.");
+            _tips.SetToolTip(_cbShowAcad,
+                "Показать окно AutoCAD при переводе в DWG. Работает только\n" +
+                "при выбранном формате DWG.");
+
+            // --- геометрия ---------------------------------------------------
+            _tips.SetToolTip(_tbDecimate,
+                "Насколько проредить сетку. 0% — оставить как есть, 80% — выбросить\n" +
+                "четыре треугольника из пяти.\n" +
+                "Добавить подробности ползунок не может: плотность сетки задал\n" +
+                "сам Navisworks при загрузке модели (Параметры → Модель → Производительность).");
+            _tips.SetToolTip(_cbSolidDetect,
+                "Узнаёт в сетке цилиндры и коробки и переписывает их шестнадцатью\n" +
+                "гранями. Прямая труба заметно худеет.\n" +
+                "Осторожно на арматуре: круглые детали станут гранёнее, чем были.\n" +
+                "Настоящих тел AutoCAD (3DSOLID) это не создаёт.");
+            _tips.SetToolTip(_cbXData,
+                "Свойства элемента из модели пишутся в чертёж как XData.\n" +
+                "Пример: марка, материал, номер системы — видно по щелчку в AutoCAD.");
+            _tips.SetToolTip(_cbMaterials,
+                "Переносить прозрачность и параметры материалов.\n" +
+                "Нужно для стекла и витражей, иначе они выйдут глухими.");
+            _tips.SetToolTip(_tbSets,
+                "Выгрузить только перечисленные наборы Navisworks (Selection Sets),\n" +
+                "через запятую. Пусто — вся модель.\n" +
+                "Пример: Узел А1, Трубопроводы 1 этаж");
+
+            // --- инженерия и координация -------------------------------------
+            _tips.SetToolTip(_cbGeoShift,
+                "Переносит модель к нулю координат и кладёт рядом .wld с исходной\n" +
+                "привязкой. Спасает, когда площадка отстоит от нуля на километры\n" +
+                "и AutoCAD теряет точность.");
+            _tips.SetToolTip(_cbGrids,
+                "Выгружает высотные отметки этажей.\n" +
+                "Геометрию координационных осей публичный API Navisworks не отдаёт.");
+            _tips.SetToolTip(_cbPipeTrace,
+                "Строит осевые линии трубопроводов с диаметром и длиной.\n" +
+                "Основа для изометрии и подсчёта метража.");
+            _tips.SetToolTip(_cbBoq,
+                "Ведомость объёмов работ: объём, масса и количество по элементам.\n" +
+                "Формат книги (CSV или Excel) выбирается в параметрах модулей.");
+            _tips.SetToolTip(_cbBcf,
+                "Выгружает сохранённые проверки Clash Detective в пакет BCF 2.1.\n" +
+                "Если проверок в модели нет, программа скажет об этом в журнале.");
+            _tips.SetToolTip(_cbAnonymize,
+                "Вычищает из свойств имена, контакты и внутренние коды.\n" +
+                "Ставьте, когда чертёж уходит подрядчику или в тендер.");
+
+            // --- экспертиза, EPC и 4D -----------------------------------------
+            _tips.SetToolTip(_cbClashCluster,
+                "Группирует коллизии по трассам и отсекает дубли.\n" +
+                "Пример: 4000 пересечений одной трубы со стеной сворачиваются\n" +
+                "в один пункт вместо четырёх тысяч строк.");
+            _tips.SetToolTip(_cbSectionPlan,
+                "Горизонтальный срез модели на заданной высоте — поэтажный план.\n" +
+                "Высота среза задаётся в параметрах модулей, по умолчанию 1200 мм.");
+            _tips.SetToolTip(_cbCadPurge,
+                "Выбрасывает из чертежа неиспользуемые слои, типы линий, стили и блоки.\n" +
+                "Файл открывается быстрее, лишнего мусора в диспетчере слоёв нет.");
+            _tips.SetToolTip(_cbPenetrations,
+                "Находит проходы труб сквозь стены и перекрытия и ставит гильзы\n" +
+                "на два типоразмера больше (DN+50).");
+            _tips.SetToolTip(_cbClearance,
+                "Проверяет высоту проходов по СП 118: где под трубой или коробом\n" +
+                "остаётся меньше 2100 мм, попадает в ведомость нарушений.");
+            _tips.SetToolTip(_cbSteelMatcher,
+                "Подбирает прокат по ГОСТ для ведомости КМ/КМД: двутавры, швеллеры,\n" +
+                "уголки, трубы. Что не легло в сортамент — помечается отдельно.");
+            _tips.SetToolTip(_cbCog,
+                "Считает массу и центр тяжести по объёму и плотности материала.\n" +
+                "Нужно для подбора крана и такелажа при монтаже блоками.");
+            _tips.SetToolTip(_cbIso,
+                "Изометрические схемы трубопроводов по ГОСТ с узлами и отметками.");
+            _tips.SetToolTip(_cbSchedule4D,
+                "Берёт задачи из TimeLiner модели (или из MS Project / CSV по ключу\n" +
+                "--schedule) и считает отставание на дату среза.");
+            _tips.SetToolTip(_cbShrinkwrap,
+                "Заменяет геометрию габаритными оболочками.\n" +
+                "Отдать подрядчику компоновку, не отдавая саму конструкцию.");
+            _tips.SetToolTip(_cbRoomFinish,
+                "Ведомость отделки по ГОСТ 21.501: площади пола, стен и потолка\n" +
+                "по помещениям. Помещения определяются по замкнутым контурам среза.");
         }
 
         void OpenModuleSettings()

@@ -145,6 +145,13 @@ namespace NWD2DWG.Plugin
             return cfg;
         }
 
+        /// <summary>
+        /// Имя последнего применённого шаблона. Хранится, чтобы диалог при
+        /// следующем открытии показывал его, а не «— не применять —»:
+        /// значения-то применялись, но выглядело это как потерянная настройка.
+        /// </summary>
+        public string PresetName = "";
+
         public void Save() { SaveTo(DefaultSettingsFile); }
 
         public void SaveTo(string path)
@@ -1073,11 +1080,13 @@ namespace NWD2DWG.Plugin
 
             if (_cbPreset.SelectedIndex <= 0)
             {
+                _config.PresetName = "";
                 _lbPresetNorms.Text = "Выберите шаблон, чтобы подставить типовые допуски";
                 return;
             }
             var pr = ConfigPreset.ByName(sel);
             if (pr == null) return;
+            _config.PresetName = pr.Name;
 
             // читаем текущие значения, накладываем шаблон, возвращаем в форму:
             // параметры, которых шаблон не касается, остаются как были
@@ -1210,8 +1219,9 @@ namespace NWD2DWG.Plugin
             _cbPreset.SelectedIndexChanged += (s, e) => ApplyPreset();
             pPreset.Controls.Add(lbPreset, 0, 0);
             pPreset.Controls.Add(_cbPreset, 1, 0);
-            pPreset.Controls.Add(PresetButton("Сохранить…", 92, SavePresetAs,
-                "Сохранить текущие значения как собственный шаблон"), 2, 0);
+            pPreset.Controls.Add(PresetButton("Как шаблон…", 92, SavePresetAs,
+                "Сохранить текущие значения отдельным шаблоном под своим именем.\r\n" +
+                "Сами настройки сохраняет кнопка «Сохранить настройки» внизу окна."), 2, 0);
             pPreset.Controls.Add(PresetButton("Дублировать", 92, ClonePreset,
                 "Создать копию выбранного шаблона под новым именем"), 3, 0);
             _btnPresetDel = PresetButton("Удалить", 74, DeletePreset,
@@ -1227,7 +1237,9 @@ namespace NWD2DWG.Plugin
             pHead.Controls.Add(_lbPresetNorms);
             pHead.Resize += (s, e) => pPreset.Width = Math.Max(420, pHead.Width - 24);
 
-            ReloadPresets(null);
+            // Встаём на шаблон, применённый в прошлый раз: раньше список всегда
+            // показывал «— не применять —», и выглядело это как потерянная настройка.
+            ReloadPresets(string.IsNullOrEmpty(_config.PresetName) ? null : _config.PresetName);
 
             var tabs = new TabControl { Dock = DockStyle.Fill };
             _tabs = tabs;
@@ -1257,7 +1269,7 @@ namespace NWD2DWG.Plugin
                 ApplyToUi(new AdvancedConfig());
             };
 
-            var btnSave = MakeButton("💾 Сохранить", true);
+            var btnSave = MakeButton("💾 Сохранить настройки", true);
             btnSave.DialogResult = DialogResult.OK;
             btnSave.Click += (s, e) => { ReadFromUi(); ReadAiFromUi(); };
 
